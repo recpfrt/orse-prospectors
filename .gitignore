@@ -5,3 +5,18 @@ data/out/
 *.pbf
 .env*
 data/state.sqlite*
+
+# --- Local business data: never commit (added 2026-10-06) ---
+# Backups and exports of local state (contain business names, emails, KvK numbers)
+data/backups/
+*.bak
+*.backup
+*.before-*.csv
+# SQLite / database files anywhere, including WAL/SHM/journal side files
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.db
+*.db-*
+# Scheduler/batch run logs written next to data
+data/*.log
