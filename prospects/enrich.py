@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 from . import config
 from .collect import domain_of
-from .customer_type import classify, installer_check
+from .customer_type import classify, dual_audience, installer_check
 from .places import best_place, norm, place_names
 from .http import polite_get
 
@@ -56,19 +56,37 @@ def _name_tokens(business_name: str | None, domain: str) -> set[str]:
     return {w for w in words if w not in stop}
 
 
+BV_SUFFIX = r"(?i:B\.\s?V\.?|BV)"
+VOF_SUFFIX = r"(?i:V\.\s?O\.\s?F\.?|VOF)"
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _prefix_matches(prefix: str, tokens: set[str]) -> bool:
+    """Business-name/domain token near the legal form; also matches with spaces removed
+    ('FOEK installatie vof' <-> foekinstallatie.nl)."""
+    if not tokens:
+        return False
+    low, compact = prefix.lower(), _compact(prefix)
+    tail = _compact(" ".join(prefix.split()[-3:]))
+    return any(t in low or t in compact or (len(tail) >= 4 and tail in t) for t in tokens)
+
+
 def detect_legal_form_with_evidence(text: str, business_name: str | None, domain: str) -> tuple[str, str | None]:
-    """Conservative: 'bv' only when 'B.V.' is attached to this business's own name
-    (or the OSM name itself ends with B.V.). Ambiguous -> 'unknown'.
+    """Conservative: 'bv' only when B.V. (any case: B.V., b.v., BV) is attached to this business's own name,
+    or the business name itself ends with it. Ambiguous -> 'unknown'.
     Returns (legal_form, evidence_snippet) so a human can check the classification."""
-    if business_name and re.search(r"\bB\.?\s?V\.?$", business_name.strip()):
-        return "bv", f"OSM name: {business_name}"
+    if business_name and re.search(r"\b" + BV_SUFFIX + r"$", business_name.strip()):
+        return "bv", f"business name: {business_name}"
     tokens = _name_tokens(business_name, domain)
     found: dict[str, str] = {}
-    for m in re.finditer(r"([A-Za-z0-9&'\-. ]{2,60}?)\s*,?\s+(B\.\s?V\.|B\.V|BV)(?=[\s,.)]|$)", text):
-        if tokens and any(t in m.group(1).lower() for t in tokens):
+    for m in re.finditer(r"([A-Za-z0-9&'\-. ]{2,60}?)\s*,?\s+" + BV_SUFFIX + r"(?=[\s,.)]|$)", text):
+        if _prefix_matches(m.group(1), tokens):
             found.setdefault("bv", m.group(0).strip()[-80:])
-    for m in re.finditer(r"([A-Za-z0-9&'\-. ]{2,60}?)\s+(V\.O\.F\.?|VOF|v\.o\.f\.?)(?=[\s,.)]|$)", text):
-        if tokens and any(t in m.group(1).lower() for t in tokens):
+    for m in re.finditer(r"([A-Za-z0-9&'\-. ]{2,60}?)\s*,?\s+" + VOF_SUFFIX + r"(?=[\s,.)]|$)", text):
+        if _prefix_matches(m.group(1), tokens):
             found.setdefault("vof", m.group(0).strip()[-80:])
     m = re.search(r".{0,40}\beenmanszaak\b.{0,20}", text, re.I)
     if m:
@@ -190,16 +208,16 @@ def town_link_count(page_html: str) -> int:
 
 
 def bv_evidence_strength(evidence: str | None, business_name: str | None, domain: str) -> str | None:
-    """'strong' when the OSM name ends in B.V., or a name/domain token appears within the 4 words directly
-    before 'B.V.'. Otherwise 'weak' (e.g. 'KVK nummer M&I BV' on mirva.nl): needs human KvK check."""
+    """'strong' when the business name itself ends in B.V., or a name/domain token appears within the words
+    directly before B.V. (any case). Otherwise 'weak' (e.g. 'KVK nummer M&I BV' on mirva.nl): human KvK check."""
     if not evidence:
         return None
-    if evidence.startswith("OSM name:"):
+    if evidence.startswith(("OSM name:", "business name:")):
         return "strong"
     tokens = _name_tokens(business_name, domain)
-    before = re.split(r"\s*,?\s+(?:B\.\s?V\.|B\.V|BV)\s*$", evidence.strip())[0]
-    near = " ".join(before.lower().split()[-4:])
-    return "strong" if tokens and any(t in near for t in tokens) else "weak"
+    before = re.split(r"\s*,?\s+" + BV_SUFFIX + r"\s*$", evidence.strip())[0]
+    near = " ".join(before.split()[-4:])
+    return "strong" if _prefix_matches(near, tokens) else "weak"
 
 
 def enrich(candidate: dict) -> dict:
@@ -278,5 +296,6 @@ def enrich(candidate: dict) -> dict:
         "homepage_excerpt": visible_text(home)[:3000],
         **classify(lower_text),
         **installer_check(lower_text),
+        "dual_audience_evidence": dual_audience(lower_text),
     })
     return result

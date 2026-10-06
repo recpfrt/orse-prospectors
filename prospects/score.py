@@ -12,7 +12,7 @@ Queues (CEO policy, 2026-10-06; email ONLY for confirmed B.V.):
   REJECTED     any exclusion, or fit below threshold. Every rejection carries an explicit reason.
 """
 
-from .customer_type import decide_installer
+from .customer_type import decide_installer, dual_audience
 from .places import landing_page_mismatch
 
 FIT_THRESHOLD = 50
@@ -141,7 +141,41 @@ def clear_homeowner(p: dict) -> tuple[bool, str]:
     home, biz = p.get("homeowner_signal") or 0, p.get("business_signal") or 0
     if biz and biz * 2 > home:
         return False, f"commercial signals too strong (homeowner {home} vs business {biz})"
+    dual = dual_audience_evidence(p)
+    if dual:
+        return False, f"mixed audience: serves business customers too ({', '.join(dual[:3])})"
     return True, ", ".join(terms[:4])
+
+
+def dual_audience_evidence(p: dict) -> list[str]:
+    """Stored evidence from enrichment (all fetched pages); older records fall back to the homepage excerpt."""
+    if "dual_audience_evidence" in p:
+        return p["dual_audience_evidence"] or []
+    return dual_audience((p.get("homepage_excerpt") or "").lower())
+
+
+def _registrable(host: str | None) -> str:
+    host = (host or "").lower().split(":")[0].strip(".")
+    return host[4:] if host.startswith("www.") else host
+
+
+def domain_guard(p: dict) -> str | None:
+    """Reason why automatic READY is unsafe: the site redirects to another domain, or the public role email
+    is on a different domain than the business website. None when consistent (or nothing to compare)."""
+    found = _registrable(p.get("domain"))
+    if not found:
+        return None                      # no website domain known: nothing to compare against
+    final_url = p.get("final_url") or ""
+    final = _registrable(final_url.split("/")[2]) if final_url.count("/") >= 2 else found
+    reasons = []
+    if final and found and final != found:
+        reasons.append(f"website redirects from {found} to {final} (different domain/entity)")
+    email = (p.get("public_email") or "").lower()
+    if "@" in email:
+        email_domain = _registrable(email.split("@", 1)[1])
+        if email_domain not in {found, final}:
+            reasons.append(f"public email domain {email_domain} differs from website domain {final or found}")
+    return "; ".join(reasons) or None
 
 
 def bv_status(p: dict) -> str:
@@ -181,9 +215,15 @@ def score(p: dict) -> dict:
     bv = bv_status(p)
     homeowner, homeowner_why = clear_homeowner(p)
     email = bool(p.get("public_email"))
+    guard = domain_guard(p)
+    # A CEO KvK check that confirmed both B.V. status and the entity match clears the domain guard.
+    entity_verified = p.get("kvk_review") == "bv" and p.get("kvk_entity_match") == "yes"
 
     if excluded:
         queue, why = REJECTED, "; ".join(excluded)
+    elif bv == "confirmed" and homeowner and email and guard and not entity_verified:
+        queue, why = KVK_CHECK, (f"domain guard: {guard} -> verify the legal entity on KvK before outreach "
+                                 f"(clear homeowner fit, public role email, fit {fit})")
     elif bv == "confirmed" and homeowner and email:
         via = "manual KvK verification" if p.get("kvk_review") == "bv" else "website evidence"
         queue, why = READY, f"B.V. confirmed ({via}), clear homeowner fit ({homeowner_why}), public role email, fit {fit}"
@@ -223,6 +263,7 @@ def score(p: dict) -> dict:
         "qualification_score": qualification,
         "score_reasons": reasons + ([f"+{BV_BONUS} B.V. confirmed"] if bv == "confirmed" and not excluded else []),
         "disqualify_reasons": excluded,
+        "domain_guard": guard,
         # compatibility with drafts.py and earlier reports
         "status": {READY: "qualified", KVK_CHECK: "kvk_check", MANUAL_REVIEW: "manual_review"}.get(queue, "disqualified"),
         "outreach_channel": "email" if queue == READY else ("none" if queue == REJECTED else "phone_or_contact_form"),

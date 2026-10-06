@@ -104,3 +104,28 @@ def installer_check(lower_text: str) -> dict:
         "unrelated_signal": unrelated,
         "installer_evidence": {"trade": trade_ev[:8], "unrelated": unrelated_ev},
     }
+
+
+# Explicit statements that a business serves BOTH private and business customers.
+DUAL_AUDIENCE_PATTERNS = [
+    r"particulier(?:en)?\s*(?:en|&|of|als|,)\s*(?:ook\s+)?(?:voor\s+)?(?:bedrijven|bedrijf|zakelijk\w*|ondernemers)",
+    r"(?:bedrijven|zakelijk\w*|ondernemers)\s*(?:en|&|of|,)\s*(?:voor\s+)?particulier(?:en)?",
+]
+# Business-audience signals (separate pages/sections for business, VvE, contractor customers).
+BUSINESS_AUDIENCE_PATTERNS = {
+    "voor bedrijven": r"(?:voor|elektricien voor|installateur voor|loodgieter voor)\s+bedrijven",
+    "voor VvE": r"(?:voor\s+)?vve'?s?\b",
+    "voor aannemers": r"(?:voor|elektricien voor|installateur voor)\s+aannemers",
+    "zakelijke klanten/markt": r"zakelijke?\s+(?:klanten|markt|dienstverlening)",
+    "woningcorporaties": r"woningcorporaties",
+}
+
+
+def dual_audience(lower_text: str) -> list[str]:
+    """Evidence that the site addresses business customers next to homeowners.
+    Mixed when: one explicit 'particulieren en bedrijven'-type statement, or 2+ distinct business-audience signals."""
+    explicit = [m.group(0) for pat in DUAL_AUDIENCE_PATTERNS for m in [re.search(pat, lower_text)] if m]
+    signals = [label for label, pat in BUSINESS_AUDIENCE_PATTERNS.items() if re.search(pat, lower_text)]
+    if explicit or len(signals) >= 2:
+        return explicit[:2] + signals
+    return []
