@@ -3,6 +3,7 @@
 domains     every domain ever attempted: revisit interval, 429 cool-down, permanent skip
 prospects   latest enrichment + scoring result per domain (JSON) and its queue
 kvk_reviews manual KvK verification results entered by the CEO
+manual_holds per-business CEO decision forcing MANUAL_REVIEW (released holds are kept for audit)
 """
 
 import datetime as dt
@@ -50,6 +51,13 @@ create table if not exists prospects (
 create index if not exists prospects_queue on prospects(queue);
 create index if not exists prospects_email on prospects(public_email);
 create index if not exists prospects_business on prospects(business_key);
+create table if not exists manual_holds (
+  domain text primary key,
+  reason text not null check (length(trim(reason)) > 0),
+  created_at text not null,
+  released_at text,
+  release_note text
+);
 create table if not exists kvk_reviews (
   domain text primary key,
   result text not null check (result in ('bv', 'not_bv', 'uncertain')),
@@ -212,3 +220,30 @@ def record_kvk_review(con: sqlite3.Connection, domain: str, result: str, kvk_num
 
 def kvk_review(con: sqlite3.Connection, domain: str) -> sqlite3.Row | None:
     return con.execute("select * from kvk_reviews where domain = ?", (domain,)).fetchone()
+
+
+def add_hold(con: sqlite3.Connection, domain: str, reason: str) -> None:
+    """Per-business manual hold: forces MANUAL_REVIEW for this domain only. Re-adding re-activates it."""
+    if not reason or not reason.strip():
+        raise ValueError("a hold needs a non-empty reason")
+    con.execute(
+        """insert into manual_holds (domain, reason, created_at) values (?, ?, ?)
+           on conflict(domain) do update set reason = excluded.reason, created_at = excluded.created_at,
+             released_at = null, release_note = null""",
+        (domain, reason.strip(), now()),
+    )
+
+
+def release_hold(con: sqlite3.Connection, domain: str, note: str | None = None) -> bool:
+    cur = con.execute("update manual_holds set released_at = ?, release_note = ? "
+                      "where domain = ? and released_at is null", (now(), note, domain))
+    return cur.rowcount == 1
+
+
+def active_hold(con: sqlite3.Connection, domain: str) -> sqlite3.Row | None:
+    return con.execute("select * from manual_holds where domain = ? and released_at is null", (domain,)).fetchone()
+
+
+def list_holds(con: sqlite3.Connection, include_released: bool = False) -> list[sqlite3.Row]:
+    sql = "select * from manual_holds" + ("" if include_released else " where released_at is null")
+    return con.execute(sql + " order by created_at").fetchall()

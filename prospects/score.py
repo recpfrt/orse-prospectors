@@ -203,6 +203,16 @@ def score(p: dict) -> dict:
             gaps.append(homeowner_why)
         queue, why = MANUAL_REVIEW, "not eligible for cold email: " + ", ".join(gaps or ["insufficient evidence"])
 
+    # Per-business manual hold (CEO decision): applies ONLY to prospects carrying a hold.
+    # It can only lower READY / KVK_CHECK to MANUAL_REVIEW; a rejected prospect stays rejected.
+    # General scoring (including how 'onzeker' is treated) is unaffected.
+    hold = p.get("manual_hold_reason")
+    if hold and queue in (READY, KVK_CHECK):
+        why = f"manual hold (CEO): {hold} | would otherwise be {queue}: {why}"
+        queue = MANUAL_REVIEW
+    elif hold:
+        why = f"{why} | manual hold (CEO): {hold}"
+
     qualification = 0 if excluded else min(fit + (BV_BONUS if bv == "confirmed" else 0), 100)
     return {
         **p,

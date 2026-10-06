@@ -9,7 +9,15 @@ from .customer_type import installer_check
 from .score import score
 
 
+HOLD_KEYS = ("manual_hold_reason", "manual_hold_at")
+
+
 def apply_review(con, p: dict) -> dict:
+    """Attach the CEO's manual decisions (KvK review, per-business hold) from local state."""
+    p = {k: v for k, v in p.items() if k not in HOLD_KEYS}   # a released hold must not linger in stored data
+    hold = state.active_hold(con, p["domain"])
+    if hold:
+        p = {**p, "manual_hold_reason": hold["reason"], "manual_hold_at": hold["created_at"]}
     review = state.kvk_review(con, p["domain"])
     if review:
         p = {**p, "kvk_review": review["result"], "kvk_review_number": review["kvk_number"],

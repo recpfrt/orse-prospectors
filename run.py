@@ -322,6 +322,36 @@ def cmd_measure(args):
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
+def cmd_hold_add(args):
+    """Force MANUAL_REVIEW for ONE business (CEO decision), with an auditable reason."""
+    con = _con(args)
+    if not con.execute("select 1 from prospects where domain = ?", (args.domain,)).fetchone():
+        sys.exit(f"unknown domain: {args.domain}")
+    state.add_hold(con, args.domain, args.reason)
+    p = _rescore_domain(con, args.domain)
+    con.commit()
+    print(f"[hold] {args.domain}: hold active ({args.reason!r}) -> queue {p['queue']}")
+
+
+def cmd_hold_release(args):
+    con = _con(args)
+    if not state.release_hold(con, args.domain, args.note):
+        sys.exit(f"no active hold for {args.domain}")
+    p = _rescore_domain(con, args.domain)
+    con.commit()
+    print(f"[hold] {args.domain}: hold released -> queue {p['queue']}")
+
+
+def cmd_hold_list(args):
+    con = _con(args)
+    rows = state.list_holds(con, include_released=args.all)
+    for r in rows:
+        status = f"released {r['released_at']} ({r['release_note'] or '-'})" if r["released_at"] else "ACTIVE"
+        print(f"{r['domain']:36} {status:30} since {r['created_at']}  reason: {r['reason']}")
+    if not rows:
+        print("[hold] no holds")
+
+
 def cmd_kvk_mark(args):
     con = _con(args)
     row = con.execute("select data from prospects where domain = ?", (args.domain,)).fetchone()
@@ -415,6 +445,19 @@ def main():
     ki.add_argument("file")
     ki.set_defaults(func=cmd_kvk_import)
     kvs.add_parser("stats").set_defaults(func=cmd_kvk_stats)
+    ho = sub.add_parser("hold", help="per-business manual hold (forces MANUAL_REVIEW for one domain)")
+    hos = ho.add_subparsers(dest="hold_cmd", required=True)
+    ha = hos.add_parser("add")
+    ha.add_argument("domain")
+    ha.add_argument("--reason", required=True, help="auditable reason, e.g. 'installer onzeker: drain-network pattern'")
+    ha.set_defaults(func=cmd_hold_add)
+    hr = hos.add_parser("release")
+    hr.add_argument("domain")
+    hr.add_argument("--note")
+    hr.set_defaults(func=cmd_hold_release)
+    hl = hos.add_parser("list")
+    hl.add_argument("--all", action="store_true", help="include released holds")
+    hl.set_defaults(func=cmd_hold_list)
     me = sub.add_parser("measure", help="aggregate measurement batches")
     me.add_argument("--only", help="only batches whose label starts with this")
     me.set_defaults(func=cmd_measure)
