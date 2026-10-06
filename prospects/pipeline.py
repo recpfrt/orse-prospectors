@@ -104,7 +104,9 @@ def import_previous(con, rows: list[dict]) -> int:
         if r.get("legal_form") == "bv" and not r.get("legal_form_confidence"):
             r["legal_form_confidence"] = enrich.bv_evidence_strength(
                 r.get("legal_form_evidence"), r.get("business_name"), r["domain"])
-        if r.get("fetch_status") == 200 and "is_installer" not in r:
+        # Legacy rows (enriched before the installer check existed) have no trade_signal; only those are
+        # recomputed. Current-format rows keep their full multi-page evidence (is_installer is obsolete).
+        if r.get("fetch_status") == 200 and "trade_signal" not in r:
             r.update(installer_check((r.get("homepage_excerpt") or "").lower()))
             r["safeguards_partial"] = True
         state.record_attempt(con, r["domain"], r.get("source", "imported"), r.get("fetch_status"))

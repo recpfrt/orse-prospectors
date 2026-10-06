@@ -121,9 +121,7 @@ class TestPipelinePathsUseNewRules(RealDbGuard):
         with tempfile.TemporaryDirectory() as d:
             db = Path(d) / "t.sqlite"
             con = state.connect(db)
-            # is_installer marks the rows as current-format for import_previous (see report: legacy-detection issue)
-            installer = dict(trade_signal=10, is_installer=True,
-                             installer_evidence={"trade": ["installateur×5", "cv-ketel×5"], "unrelated": []})
+            installer = dict(trade_signal=10, installer_evidence={"trade": ["installateur×5", "cv-ketel×5"], "unrelated": []})
             rows = [
                 base(customer_type="homeowner", domain="redirect.nl", final_url="https://other.nl/",
                      public_email="info@other.nl", kvk_number="11111111", **installer),
@@ -140,3 +138,35 @@ class TestPipelinePathsUseNewRules(RealDbGuard):
             got = {r["domain"]: r["queue"] for r in con.execute("select domain, queue from prospects")}
             con.close()
         self.assertEqual(got, {"redirect.nl": "KVK_CHECK", "mixed.nl": "MANUAL_REVIEW", "clean.nl": "READY"})
+
+
+class TestImportFormatDetection(RealDbGuard):
+    """Regression (2026-10-06): import_previous treated current-format rows as legacy because it checked the
+    obsolete `is_installer` field, and recomputed installer evidence from the short homepage excerpt."""
+
+    def _import(self, row):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            con = state.connect(Path(d) / "t.sqlite")
+            pipeline.import_previous(con, [row])
+            stored = json.loads(con.execute("select data from prospects").fetchone()["data"])
+            con.close()
+        return stored
+
+    def test_current_format_row_keeps_its_installer_evidence(self):
+        row = base(customer_type="homeowner", domain="current.nl", public_email="info@current.nl",
+                   trade_signal=12, installer_evidence={"trade": ["installateur×6", "cv-ketel×6"], "unrelated": []},
+                   homepage_excerpt="Welkom op onze website.")          # excerpt has no trade words at all
+        self.assertNotIn("is_installer", row)
+        stored = self._import(row)
+        self.assertEqual(stored["trade_signal"], 12)
+        self.assertNotIn("safeguards_partial", stored)
+        self.assertNotEqual(stored["queue"], "REJECTED")
+
+    def test_legacy_row_without_trade_signal_is_still_recomputed(self):
+        row = base(customer_type="homeowner", domain="legacy.nl", public_email="info@legacy.nl",
+                   homepage_excerpt="Installateur voor cv-ketel, lekkage en loodgieter werk.")
+        self.assertNotIn("trade_signal", row)
+        stored = self._import(row)
+        self.assertTrue(stored["safeguards_partial"])
+        self.assertGreater(stored["trade_signal"], 0)

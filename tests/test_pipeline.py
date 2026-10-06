@@ -185,7 +185,7 @@ class TestKvkQueueRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             con = state.connect(pathlib.Path(d) / "t.sqlite")
             row = base(customer_type="homeowner", legal_form="unknown", domain="voorbeeld.nl", public_email="info@voorbeeld.nl",
-                       business_name="Voorbeeld Installaties", city="Utrecht", is_installer=True)
+                       business_name="Voorbeeld Installaties", city="Utrecht", trade_signal=10, installer_evidence={"trade": ["installateur×5"], "unrelated": []})
             pipeline.import_previous(con, [row])
             self.assertEqual(state.load_prospects(con, "KVK_CHECK")[0]["domain"], "voorbeeld.nl")
             for result, expected in (("bv", "READY"), ("not_bv", "MANUAL_REVIEW")):
