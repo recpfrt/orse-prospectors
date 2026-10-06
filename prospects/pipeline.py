@@ -75,7 +75,7 @@ def run_daily(con, cc_tsv: str, batch: int, seed: int) -> tuple[list[dict], dict
 def _red_list() -> tuple[set[str], set[str]]:
     import csv
     from pathlib import Path
-    path = Path(state.DB_PATH).parent / "do_not_contact.csv"
+    path = state.PROJECT_ROOT / "data" / "do_not_contact.csv"
     domains, emails = set(), set()
     if path.exists():
         for row in csv.DictReader(path.open(encoding="utf-8")):

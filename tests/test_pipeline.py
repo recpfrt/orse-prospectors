@@ -1,3 +1,4 @@
+from tests import _isolation  # noqa: F401  (isolated test database, see tests/_isolation.py)
 import unittest
 
 from prospects.collect import dedupe, domain_of, normalize_website

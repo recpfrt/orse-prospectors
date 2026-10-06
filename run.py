@@ -36,6 +36,22 @@ def load_red_list() -> tuple[set[str], set[str]]:
     return domains, emails
 
 
+_OPEN_CONNECTIONS = []
+
+
+def _con(args):
+    """Open the state database chosen for this command: --db, else $ORSE_PROSPECTS_DB, else the real default."""
+    con = state.connect(getattr(args, "db", None))
+    _OPEN_CONNECTIONS.append(con)
+    return con
+
+
+def close_connections():
+    """Close every connection opened by commands (called when the CLI exits; tests call it directly)."""
+    while _OPEN_CONNECTIONS:
+        _OPEN_CONNECTIONS.pop().close()
+
+
 def cmd_dryrun(args):
     OUT.mkdir(parents=True, exist_ok=True)
     label = ("cc" if args.source == "commoncrawl" else
@@ -145,7 +161,7 @@ BATCH_LOG = OUT / "batches.jsonl"
 
 
 def cmd_daily(args):
-    con = state.connect()
+    con = _con(args)
     results, meta = pipeline.run_daily(con, args.cc_tsv, args.batch, args.seed)
     out = OUT / "daily" / meta["started"].replace(":", "")
     path = report.write_daily(out, results, meta)
@@ -161,13 +177,14 @@ def cmd_daily(args):
 
 
 def cmd_import(args):
-    con = state.connect()
+    con = _con(args)
     rows = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    print(f"[import] {pipeline.import_previous(con, rows)} prospects imported into {state.DB_PATH}", file=sys.stderr)
+    print(f"[import] {pipeline.import_previous(con, rows)} prospects imported into "
+          f"{state.resolve_db_path(getattr(args, 'db', None))}", file=sys.stderr)
 
 
 def cmd_kvk_list(args):
-    con = state.connect()
+    con = _con(args)
     rows = sorted(state.load_prospects(con, "KVK_CHECK"), key=lambda p: -(p.get("fit_score") or 0))
     OUT.mkdir(parents=True, exist_ok=True)
     report.write_queue_csv(OUT / "kvk_check.csv", rows)
@@ -191,7 +208,7 @@ KVK_SHEET_COLUMNS = ["domain", "business_name", "city", "website", "public_email
 def cmd_kvk_sheet(args):
     """Freeze the first N KVK CHECK prospects (highest fit first) into a CSV for manual verification."""
     import csv
-    con = state.connect()
+    con = _con(args)
     rows = sorted(state.load_prospects(con, "KVK_CHECK"), key=lambda p: (-(p.get("fit_score") or 0), p["domain"]))
     rows = rows[: args.first]
     path = OUT / f"kvk_review_{args.batch}.csv"
@@ -216,7 +233,7 @@ def _yn(value: str) -> str:
 def cmd_kvk_import(args):
     """Record the CEO's filled-in verification sheet and re-score those prospects."""
     import csv
-    con = state.connect()
+    con = _con(args)
     n = 0
     with open(args.file, encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
@@ -251,7 +268,7 @@ def _rescore_domain(con, domain: str) -> dict:
 
 
 def cmd_kvk_stats(args):
-    con = state.connect()
+    con = _con(args)
     rows = con.execute("select * from kvk_reviews").fetchall()
     total = len(rows)
     c = {k: sum(1 for r in rows if r["result"] == k) for k in ("bv", "not_bv", "uncertain")}
@@ -275,7 +292,7 @@ def cmd_measure(args):
     batches = [json.loads(l) for l in BATCH_LOG.read_text(encoding="utf-8").splitlines() if l.strip()]
     if args.only:
         batches = [b for b in batches if b["batch"].startswith(args.only)]
-    con = state.connect()
+    con = _con(args)
     domains = [d for b in batches for d in b["domains"]]
     rows = [json.loads(r["data"]) for d in domains
             for r in [con.execute("select data from prospects where domain = ?", (d,)).fetchone()] if r]
@@ -306,7 +323,7 @@ def cmd_measure(args):
 
 
 def cmd_kvk_mark(args):
-    con = state.connect()
+    con = _con(args)
     row = con.execute("select data from prospects where domain = ?", (args.domain,)).fetchone()
     if not row:
         sys.exit(f"unknown domain: {args.domain}")
@@ -326,7 +343,7 @@ def cmd_kvk_mark(args):
 
 def cmd_rescore(args):
     """Re-apply the current scoring rules to stored results (no website fetches)."""
-    con = state.connect()
+    con = _con(args)
     n = 0
     order = {r["domain"]: r["first_seen"] for r in con.execute("select domain, first_seen from domains")}
     for p in sorted(state.load_prospects(con), key=lambda x: (order.get(x["domain"], ""), x["domain"])):
@@ -345,6 +362,7 @@ def cmd_rescore(args):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--db", help="state database path (default: $ORSE_PROSPECTS_DB or data/state.sqlite)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("dryrun")
     d.add_argument("--city", default="*")
@@ -401,7 +419,10 @@ def main():
     me.add_argument("--only", help="only batches whose label starts with this")
     me.set_defaults(func=cmd_measure)
     args = ap.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    finally:
+        close_connections()
 
 
 if __name__ == "__main__":

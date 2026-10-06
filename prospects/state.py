@@ -7,11 +7,24 @@ kvk_reviews manual KvK verification results entered by the CEO
 
 import datetime as dt
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "state.sqlite"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+REAL_DB_PATH = PROJECT_ROOT / "data" / "state.sqlite"
+
+# The database path is resolved at CALL time, never captured at import time:
+#   explicit path argument  >  $ORSE_PROSPECTS_DB  >  REAL_DB_PATH
+DB_ENV = "ORSE_PROSPECTS_DB"
+# Set by the test package. In test mode the real database is refused unless a test opts in explicitly.
+TEST_MODE_ENV = "ORSE_PROSPECTS_TESTING"
+ALLOW_REAL_DB_ENV = "ORSE_PROSPECTS_ALLOW_REAL_DB"
+
+
+class RealStateAccessError(RuntimeError):
+    """Raised when code running in test mode tries to open the real local state database."""
 REVISIT_DAYS = 30
 COOLDOWN_429_DAYS = 7
 MAX_429 = 2          # after this many 429 responses, skip the domain permanently
@@ -56,7 +69,25 @@ def now() -> str:
     return dt.datetime.now().isoformat(timespec="seconds")
 
 
-def connect(path: Path = DB_PATH) -> sqlite3.Connection:
+def resolve_db_path(path: str | Path | None = None) -> Path:
+    if path is not None:
+        resolved = Path(path)
+    elif os.environ.get(DB_ENV):
+        resolved = Path(os.environ[DB_ENV])
+    else:
+        resolved = REAL_DB_PATH
+    resolved = resolved.resolve()
+    if (os.environ.get(TEST_MODE_ENV) == "1" and resolved == REAL_DB_PATH.resolve()
+            and os.environ.get(ALLOW_REAL_DB_ENV) != "1"):
+        raise RealStateAccessError(
+            f"Refusing to open the real state database ({resolved}) in test mode. "
+            f"Pass a temporary path or set {DB_ENV}; set {ALLOW_REAL_DB_ENV}=1 only for an intentional "
+            f"real-state integration test.")
+    return resolved
+
+
+def connect(path: str | Path | None = None) -> sqlite3.Connection:
+    path = resolve_db_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
