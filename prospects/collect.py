@@ -146,6 +146,17 @@ DOMAIN_CATEGORY = [
 ]
 
 
+# Drain-service domains (riool / ontstop / lekkage) with no other core trade keyword are skipped at selection.
+# Batch 1 evidence: 28/250 such domains -> 0 READY, 1 KVK_CHECK, 13 rejected as networks/duplicates.
+DRAIN_RE = re.compile(r"riool|ontstop|lekkage")
+OTHER_TRADE_RE = re.compile(r"install|loodgiet|sanitair|elektr|electr|verwarm|klimaat|warmtepomp|airco|cvservice|cv-")
+
+
+def is_drain_only(domain: str) -> bool:
+    label = domain.lower().split(".")[0]
+    return bool(DRAIN_RE.search(label)) and not OTHER_TRADE_RE.search(label)
+
+
 def collect_commoncrawl(tsv_path: str, sample: int, seed: int, exclude_domains: set[str]) -> list[dict]:
     """Candidates from the Common Crawl domain list (pre-filtered to .nl trade keywords).
     Only the domain is known here; name and city come from the business's own website."""
@@ -161,6 +172,8 @@ def collect_commoncrawl(tsv_path: str, sample: int, seed: int, exclude_domains: 
             continue  # registrable .nl domains only
         domains.append(domain)
     random.Random(seed).shuffle(domains)
+    # Filter after the seeded shuffle so the relative order of all remaining domains is unchanged.
+    domains = [d for d in domains if not is_drain_only(d)]
     out = []
     for domain in domains[:sample]:
         category = next((c for p, c in DOMAIN_CATEGORY if p.search(domain)), "hvac")
