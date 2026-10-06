@@ -7,6 +7,7 @@ Two separate decisions:
 """
 
 from . import config
+from .places import landing_page_mismatch
 
 
 def score(p: dict) -> dict:
@@ -27,6 +28,9 @@ def score(p: dict) -> dict:
             excluded.append(f"large company ({p.get('team_count')} staff)")
         if p.get("booking_tools"):
             excluded.append("already uses an online booking tool: " + ", ".join(p["booking_tools"]))
+        mismatch = landing_page_mismatch(p.get("domain") or "", p.get("city"))
+        if mismatch:
+            excluded.append(mismatch)
         if len(p.get("broker_markers") or []) >= 2:
             excluded.append("lead-broker / referral network (" + ", ".join(p["broker_markers"][:3]) + ")")
         if len(p.get("webshop_markers") or []) >= 2:

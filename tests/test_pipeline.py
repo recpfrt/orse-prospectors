@@ -109,3 +109,22 @@ class TestNewExclusions(unittest.TestCase):
     def test_commoncrawl_requires_dutch_address(self):
         r = score(base(source="commoncrawl", nl_address_found=False))
         self.assertEqual(r["status"], "disqualified")
+
+
+class TestPlaces(unittest.TestCase):
+    def test_town_parsing_drops_trailing_junk(self):
+        from prospects.enrich import postcode_city
+        self.assertEqual(postcode_city("Dorpsstraat 1, 5321 AB Hedel Info info@x.nl"), "Hedel")
+        self.assertEqual(postcode_city("Kerkplein 2 4611 AA Bergen op Zoom Tel 0164"), "Bergen op Zoom")
+
+    def test_landing_page_mismatch(self):
+        from prospects.places import landing_page_mismatch
+        self.assertIsNotNone(landing_page_mismatch("ontstoppingsbedrijfvelp.nl", "Hoofddorp"))
+        self.assertIsNone(landing_page_mismatch("rioolontstoppengoirle.nl", "Goirle"))
+        self.assertIsNone(landing_page_mismatch("feenstra-elektro.nl", "Den Dungen"))
+        self.assertIsNone(landing_page_mismatch("loodgietersbedrijfutrecht.nl", "Utrecht"))
+        self.assertIsNotNone(landing_page_mismatch("electricien-voorburg.nl", "Warmond"))
+        # surnames that happen to be place names
+        self.assertIsNone(landing_page_mismatch("vandongeninstallatie.nl", "Hank"))
+        self.assertIsNone(landing_page_mismatch("installatiebedrijfvanbenschop.nl", "Kerkdriel"))
+        self.assertIsNone(landing_page_mismatch("nijbroekinstallatiebedrijf.nl", "Dordrecht"))

@@ -56,12 +56,14 @@ def robots_allows(url: str) -> bool:
             _robots_cache[base] = "deny-all"  # type: ignore[assignment]
         elif 400 <= status < 500:
             _robots_cache[base] = None  # no robots.txt -> allowed
+        elif status == 0:
+            _robots_cache[base] = "unreachable"  # type: ignore[assignment]  DNS/connection failure
         else:
-            _robots_cache[base] = "deny-all"  # type: ignore[assignment]
+            _robots_cache[base] = "deny-all"  # type: ignore[assignment]  5xx: be conservative
     rp = _robots_cache[base]
     if rp is None:
         return True
-    if rp == "deny-all":
+    if rp in ("deny-all", "unreachable"):
         return False
     return rp.can_fetch(config.USER_AGENT, url)
 
@@ -69,5 +71,7 @@ def robots_allows(url: str) -> bool:
 def polite_get(url: str) -> tuple[int, str, str]:
     """Fetch only if robots.txt allows it. Returns (status, final_url, text); status -1 = blocked by robots."""
     if not robots_allows(url):
-        return -1, url, ""
+        base = "{0.scheme}://{0.netloc}".format(urlparse(url))
+        # 0 = site unreachable (dead domain / connection refused); -1 = robots.txt or bot protection says no
+        return (0 if _robots_cache.get(base) == "unreachable" else -1), url, ""
     return _raw_get(url)

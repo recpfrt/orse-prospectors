@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 from . import config
 from .collect import domain_of
 from .customer_type import classify
+from .places import best_place, place_names
 from .http import polite_get
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -116,7 +117,7 @@ def _subpage_links(base_url: str, page_html: str, site_domain: str) -> list[str]
 
 
 
-POSTCODE_CITY_RE = re.compile(r"\b[1-9]\d{3}\s?(?!SA|SD|SS)[A-Z]{2}\s{1,3}([A-Z][a-zA-Z'\-]+(?:[ \-][A-Z][a-zA-Z'\-]+)?)")
+POSTCODE_CITY_RE = re.compile(r"\b[1-9]\d{3}\s?(?!SA|SD|SS)[A-Z]{2}[\s,]{1,3}((?:['A-Za-z\-]+\s?){1,5})")
 # Lead-broker / referral networks sell homeowner requests to tradespeople; not our target.
 BROKER_PHRASES = ["aangesloten vakman", "aangesloten vakmensen", "aangesloten bedrijven", "ons netwerk van",
                   "landelijk netwerk", "in heel nederland", "door heel nederland", "landelijk dekkend",
@@ -142,8 +143,16 @@ def site_name(page_html: str, domain: str) -> str:
 
 
 def postcode_city(text: str) -> str | None:
-    m = POSTCODE_CITY_RE.search(text)
-    return m.group(1) if m else None
+    """Town after the first Dutch postcode, validated against the CBS place list when available."""
+    for m in POSTCODE_CITY_RE.finditer(text):
+        tokens = m.group(1).split()
+        if place_names():
+            place = best_place(tokens)
+            if place:
+                return place
+        elif tokens and tokens[0][:1].isupper():
+            return tokens[0]
+    return None
 
 
 def enrich(candidate: dict) -> dict:
