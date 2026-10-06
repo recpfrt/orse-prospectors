@@ -27,6 +27,9 @@ def score(p: dict) -> dict:
             excluded.append(f"large company ({p.get('team_count')} staff)")
         if p.get("booking_tools"):
             excluded.append("already uses an online booking tool: " + ", ".join(p["booking_tools"]))
+        if p.get("customer_type") == "business":
+            ev = ", ".join(p.get("customer_type_evidence", {}).get("business", [])[:4])
+            excluded.append(f"serves mainly commercial/industrial clients ({ev})")
 
     total = 0
     if not excluded:
@@ -35,6 +38,16 @@ def score(p: dict) -> dict:
             reasons.append("+30 no online booking (phone/form only)")
         else:
             reasons.append("+0 site suggests online planning: " + ", ".join(p.get("booking_phrases", [])))
+        ctype = p.get("customer_type")
+        if ctype == "homeowner":
+            total += 20
+            ev = ", ".join(p.get("customer_type_evidence", {}).get("homeowner", [])[:4])
+            reasons.append(f"+20 serves homeowners ({ev})")
+        elif ctype == "mixed":
+            total += 5
+            reasons.append("+5 mixed homeowner/business clientele")
+        else:
+            reasons.append("+0 customer type unclear from website")
         if p.get("team_signal") == "small":
             total += 20
             reasons.append("+20 small team signal")
@@ -78,5 +91,6 @@ def score(p: dict) -> dict:
         status, channel = "manual_review", "phone_or_contact_form"
         reasons.append(f"legal form '{p.get('legal_form')}' is not B.V. -> no email (policy)")
 
-    return {**p, "qualification_score": total, "score_reasons": reasons,
+    strong = channel == "email" and p.get("customer_type") == "homeowner"
+    return {**p, "strong_prospect": strong, "qualification_score": total, "score_reasons": reasons,
             "disqualify_reasons": excluded, "status": status, "outreach_channel": channel}

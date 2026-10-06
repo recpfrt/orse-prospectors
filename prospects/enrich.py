@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 from . import config
 from .collect import domain_of
+from .customer_type import classify
 from .http import polite_get
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -24,7 +25,7 @@ TEAM_RE = re.compile(
 )
 BRANCHES_RE = re.compile(r"(\d{1,2})\s+vestigingen", re.I)
 SUBPAGE_HINTS = ("contact", "over-ons", "over ons", "overons", "afspraak", "team",
-                 "wie-zijn-wij", "wie zijn wij", "bedrijf", "about")
+                 "wie-zijn-wij", "wie zijn wij", "bedrijf", "about", "diensten", "particulier")
 
 
 def visible_text(page_html: str) -> str:
@@ -174,5 +175,6 @@ def enrich(candidate: dict) -> dict:
         "website_quality": website_quality(final_url, home, visible_text(home)),
         "is_dutch": 'lang="nl' in lower_html[:5000] or dutch_ratio >= 0.08,
         "homepage_excerpt": visible_text(home)[:3000],
+        **classify(lower_text),
     })
     return result

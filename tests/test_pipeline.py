@@ -68,3 +68,31 @@ class TestScore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCustomerType(unittest.TestCase):
+    def test_homeowner(self):
+        from prospects.customer_type import classify
+        r = classify("wij helpen particulieren met lekkage, verstopping en uw cv-ketel. ook voor uw badkamer.")
+        self.assertEqual(r["customer_type"], "homeowner")
+        self.assertTrue(any(e.startswith("lekkage") for e in r["customer_type_evidence"]["homeowner"]))
+
+    def test_business(self):
+        from prospects.customer_type import classify
+        r = classify("installaties voor utiliteitsbouw, industrie, zorginstellingen en kantoorgebouwen.")
+        self.assertEqual(r["customer_type"], "business")
+
+    def test_unknown_and_word_boundaries(self):
+        from prospects.customer_type import classify
+        self.assertEqual(classify("welkom op onze website")["customer_type"], "unknown")
+        # 'thuisbasis' must not count as 'thuis'
+        self.assertEqual(classify("thuisbasis thuisbasis thuisbasis")["homeowner_signal"], 0)
+
+    def test_business_customer_type_is_excluded(self):
+        r = score(base(customer_type="business", customer_type_evidence={"business": ["utiliteit×3"]}))
+        self.assertEqual(r["status"], "disqualified")
+
+    def test_strong_prospect_requires_homeowner_and_email_channel(self):
+        self.assertTrue(score(base(customer_type="homeowner"))["strong_prospect"])
+        self.assertFalse(score(base(customer_type="mixed"))["strong_prospect"])
+        self.assertFalse(score(base(customer_type="homeowner", legal_form="vof"))["strong_prospect"])
