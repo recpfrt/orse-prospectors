@@ -141,12 +141,22 @@ def cmd_drafts(args):
     print(f"[drafts] wrote {out} and {md}", file=sys.stderr)
 
 
+BATCH_LOG = OUT / "batches.jsonl"
+
+
 def cmd_daily(args):
     con = state.connect()
     results, meta = pipeline.run_daily(con, args.cc_tsv, args.batch, args.seed)
-    out = OUT / "daily" / meta["date"]
+    out = OUT / "daily" / meta["started"].replace(":", "")
     path = report.write_daily(out, results, meta)
-    print(json.dumps(report.metrics(results), ensure_ascii=False, indent=2))
+    m = report.metrics(results)
+    entry = {"batch": args.label or meta["started"], **meta, "metrics": m,
+             "domains": [r["domain"] for r in results], "report": str(path)}
+    OUT.mkdir(parents=True, exist_ok=True)
+    with BATCH_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print(json.dumps({**m, "elapsed_min": meta["elapsed_min"], "pool_remaining": meta["pool_remaining"]},
+                     ensure_ascii=False, indent=2))
     print(f"[daily] report: {path}", file=sys.stderr)
 
 
@@ -171,20 +181,147 @@ def cmd_kvk_list(args):
     print(f"[kvk] {len(rows)} companies to verify -> {OUT / 'kvk_check.md'} and kvk_check.csv")
 
 
+KVK_SHEET_COLUMNS = ["domain", "business_name", "city", "website", "public_email", "kvk_search_url",
+                     "kvk_number_on_site", "homeowner_evidence", "queue_reason",
+                     # filled in by the CEO after checking kvk.nl by hand:
+                     "is_bv (yes/no/uncertain)", "kvk_number", "entity_matches (yes/no)", "active (yes/no)",
+                     "genuine_local_installer (yes/no)", "homeowner_fit_reasonable (yes/no)", "notes"]
+
+
+def cmd_kvk_sheet(args):
+    """Freeze the first N KVK CHECK prospects (highest fit first) into a CSV for manual verification."""
+    import csv
+    con = state.connect()
+    rows = sorted(state.load_prospects(con, "KVK_CHECK"), key=lambda p: (-(p.get("fit_score") or 0), p["domain"]))
+    rows = rows[: args.first]
+    path = OUT / f"kvk_review_{args.batch}.csv"
+    if path.exists() and not args.force:
+        sys.exit(f"{path} already exists (frozen). Use --force to overwrite.")
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(KVK_SHEET_COLUMNS)
+        for p in rows:
+            w.writerow([p["domain"], p.get("business_name"), p.get("city"), p.get("final_url") or p.get("website"),
+                        p.get("public_email"), report.kvk_search_url(p), p.get("kvk_number"),
+                        ", ".join(p.get("customer_type_evidence", {}).get("homeowner", [])[:5]),
+                        p.get("queue_reason"), "", "", "", "", "", "", ""])
+    print(f"[kvk] {len(rows)} prospects frozen -> {path}")
+
+
+def _yn(value: str) -> str:
+    v = (value or "").strip().lower()
+    return {"yes": "yes", "ja": "yes", "y": "yes", "j": "yes", "no": "no", "nee": "no", "n": "no"}.get(v, "unknown")
+
+
+def cmd_kvk_import(args):
+    """Record the CEO's filled-in verification sheet and re-score those prospects."""
+    import csv
+    con = state.connect()
+    n = 0
+    with open(args.file, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            raw = (row.get("is_bv (yes/no/uncertain)") or "").strip().lower()
+            if not raw:
+                continue  # not checked yet
+            result = {"yes": "bv", "ja": "bv", "no": "not_bv", "nee": "not_bv"}.get(raw, "uncertain")
+            state.record_kvk_review(
+                con, row["domain"], result, (row.get("kvk_number") or "").strip() or None,
+                (row.get("notes") or "").strip() or None,
+                entity_match=_yn(row.get("entity_matches (yes/no)")), active=_yn(row.get("active (yes/no)")),
+                genuine_installer=_yn(row.get("genuine_local_installer (yes/no)")),
+                homeowner_ok=_yn(row.get("homeowner_fit_reasonable (yes/no)")),
+                review_batch=pathlib_stem(args.file))
+            _rescore_domain(con, row["domain"])
+            n += 1
+    con.commit()
+    print(f"[kvk] {n} reviews recorded")
+    cmd_kvk_stats(args)
+
+
+def pathlib_stem(path: str) -> str:
+    return Path(path).stem
+
+
+def _rescore_domain(con, domain: str) -> dict:
+    row = con.execute("select data from prospects where domain = ?", (domain,)).fetchone()
+    p = {k: v for k, v in json.loads(row["data"]).items() if k not in pipeline.STRIP}
+    p = score.score(pipeline.apply_review(con, p))
+    state.save_prospect(con, p)
+    return p
+
+
+def cmd_kvk_stats(args):
+    con = state.connect()
+    rows = con.execute("select * from kvk_reviews").fetchall()
+    total = len(rows)
+    c = {k: sum(1 for r in rows if r["result"] == k) for k in ("bv", "not_bv", "uncertain")}
+    usable = sum(1 for r in rows if r["result"] == "bv" and r["entity_match"] != "no" and r["active"] != "no"
+                 and r["genuine_installer"] != "no" and r["homeowner_ok"] != "no")
+    print(json.dumps({
+        "reviewed": total, "bv": c["bv"], "not_bv": c["not_bv"], "uncertain": c["uncertain"],
+        "kvk_check_to_bv_rate": round(c["bv"] / total, 2) if total else None,
+        "kvk_check_to_ready_rate": round(usable / total, 2) if total else None,
+        "entity_mismatch": sum(1 for r in rows if r["entity_match"] == "no"),
+        "inactive": sum(1 for r in rows if r["active"] == "no"),
+        "not_genuine_installer": sum(1 for r in rows if r["genuine_installer"] == "no"),
+        "homeowner_fit_wrong": sum(1 for r in rows if r["homeowner_ok"] == "no"),
+    }, indent=2))
+
+
+def cmd_measure(args):
+    """Aggregate all measurement batches + KvK review results into the requested ratios."""
+    if not BATCH_LOG.exists():
+        sys.exit("no batches logged yet")
+    batches = [json.loads(l) for l in BATCH_LOG.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if args.only:
+        batches = [b for b in batches if b["batch"].startswith(args.only)]
+    con = state.connect()
+    domains = [d for b in batches for d in b["domains"]]
+    rows = [json.loads(r["data"]) for d in domains
+            for r in [con.execute("select data from prospects where domain = ?", (d,)).fetchone()] if r]
+    m = report.metrics(rows)   # current state (after KvK reviews and rule changes)
+    reviews = con.execute("select result from kvk_reviews").fetchall()
+    bv_rate = (sum(1 for r in reviews if r["result"] == "bv") / len(reviews)) if reviews else None
+    n = max(m["Domains processed"], 1)
+    ready_per_100 = 100 * m["Ready for outreach"] / n
+    kvk_per_100 = 100 * m["KVK checks required"] / n
+    expected_ready_per_100 = ready_per_100 + (kvk_per_100 * bv_rate if bv_rate is not None else 0)
+    minutes = sum(b["elapsed_min"] for b in batches)
+    sec_per_domain = 60 * minutes / n
+    need = lambda target: round(100 * target / expected_ready_per_100) if expected_ready_per_100 else None
+    out = {
+        "batches": [b["batch"] for b in batches], "metrics_total": m,
+        "ready_per_100_domains (website-confirmed B.V.)": round(ready_per_100, 2),
+        "kvk_check_per_100_domains": round(kvk_per_100, 2),
+        "kvk_check_to_bv_rate": round(bv_rate, 2) if bv_rate is not None else "not measured yet",
+        "expected_ready_per_100_incl_kvk": round(expected_ready_per_100, 2),
+        "reachable_to_email_rate": round(m["Public business emails"] / max(m["Websites reachable"], 1), 2),
+        "homeowner_to_ready_rate": round(m["Ready for outreach"] / max(m["Homeowner-fit"], 1), 3),
+        "avg_seconds_per_domain": round(sec_per_domain, 1),
+        "domains_needed_for_5_ready_per_day": need(5),
+        "domains_needed_for_10_ready_per_day": need(10),
+        "pool_remaining": batches[-1].get("pool_remaining"),
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
 def cmd_kvk_mark(args):
     con = state.connect()
     row = con.execute("select data from prospects where domain = ?", (args.domain,)).fetchone()
     if not row:
         sys.exit(f"unknown domain: {args.domain}")
-    result = "bv" if args.bv else "not_bv"
-    state.record_kvk_review(con, args.domain, result, args.kvk, args.note)
+    result = "bv" if args.bv else ("not_bv" if args.not_bv else "uncertain")
+    state.record_kvk_review(con, args.domain, result, args.kvk, args.note,
+                            entity_match=args.entity_match, active=args.active,
+                            genuine_installer=args.genuine, homeowner_ok=args.homeowner_ok)
     p = json.loads(row["data"])
     p = {k: v for k, v in p.items() if k not in ("queue", "queue_reason", "status", "outreach_channel",
                                                 "strong_prospect", "disqualify_reasons", "score_reasons")}
     p = score.score(pipeline.apply_review(con, p))
     state.save_prospect(con, p)
     con.commit()
-    print(f"[kvk] {args.domain}: marked {'kvk_verified_bv' if args.bv else 'not_bv'} -> queue {p['queue']}")
+    label = {"bv": "kvk_verified_bv", "not_bv": "not_bv", "uncertain": "uncertain"}[result]
+    print(f"[kvk] {args.domain}: marked {label} -> queue {p['queue']}")
 
 
 def cmd_rescore(args):
@@ -230,6 +367,7 @@ def main():
     dd.add_argument("--batch", type=int, default=120)
     dd.add_argument("--cc-tsv", default="data/raw/cc/nl-trade-domains.tsv")
     dd.add_argument("--seed", type=int, default=20261006)
+    dd.add_argument("--label", help="batch label for the measurement log, e.g. measure-1")
     dd.set_defaults(func=cmd_daily)
     sub.add_parser("rescore", help="re-apply current rules to stored results (no fetching)").set_defaults(func=cmd_rescore)
     im = sub.add_parser("import", help="seed local state with an earlier scored JSON file")
@@ -243,9 +381,25 @@ def main():
     grp = km.add_mutually_exclusive_group(required=True)
     grp.add_argument("--bv", action="store_true", help="CEO verified on kvk.nl: legal form is B.V.")
     grp.add_argument("--not-bv", action="store_true", help="CEO verified on kvk.nl: not a B.V.")
+    grp.add_argument("--uncertain", action="store_true", help="CEO could not determine the legal form")
+    for flag, dest in (("--entity-match", "entity_match"), ("--active", "active"),
+                       ("--genuine", "genuine"), ("--homeowner-ok", "homeowner_ok")):
+        km.add_argument(flag, dest=dest, choices=["yes", "no", "unknown"], default="unknown")
     km.add_argument("--kvk", help="KvK number seen on kvk.nl")
     km.add_argument("--note")
     km.set_defaults(func=cmd_kvk_mark)
+    ks = kvs.add_parser("sheet", help="freeze the first N KVK CHECK prospects into a review CSV")
+    ks.add_argument("--first", type=int, default=15)
+    ks.add_argument("--batch", default="batch1")
+    ks.add_argument("--force", action="store_true")
+    ks.set_defaults(func=cmd_kvk_sheet)
+    ki = kvs.add_parser("import", help="record the CEO's filled-in review CSV")
+    ki.add_argument("file")
+    ki.set_defaults(func=cmd_kvk_import)
+    kvs.add_parser("stats").set_defaults(func=cmd_kvk_stats)
+    me = sub.add_parser("measure", help="aggregate measurement batches")
+    me.add_argument("--only", help="only batches whose label starts with this")
+    me.set_defaults(func=cmd_measure)
     args = ap.parse_args()
     args.func(args)
 

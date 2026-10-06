@@ -5,7 +5,7 @@ import urllib.parse
 from collections import Counter
 from pathlib import Path
 
-from .score import KVK_CHECK, MANUAL_PHONE, READY, REJECTED
+from .score import KVK_CHECK, MANUAL_REVIEW, READY, REJECTED
 
 
 def _ev(p: dict, key: str) -> str:
@@ -47,10 +47,19 @@ def metrics(results: list[dict]) -> dict:
         "B.V. confirmed": sum(1 for p in results if p.get("bv_status") == "confirmed"),
         "KVK checks required": q[KVK_CHECK],
         "Ready for outreach": q[READY],
-        "Manual-review / phone": q[MANUAL_PHONE],
+        "Manual-review / phone": q[MANUAL_REVIEW],
         "Rejected": q[REJECTED],
         "Duplicates": sum(1 for p in results if p.get("duplicate_of")),
+        "Networks / brokers / landing pages": sum(1 for p in results if is_network(p)),
     }
+
+
+NETWORK_MARKERS = ("lead-broker", "franchise", "network", "regional landing page", "same KvK number")
+
+
+def is_network(p: dict) -> bool:
+    reasons = " ".join(p.get("disqualify_reasons") or []) + " " + str(p.get("duplicate_of") or "")
+    return any(m in reasons for m in NETWORK_MARKERS)
 
 
 def write_queue_csv(path: Path, rows: list[dict]) -> None:
@@ -87,7 +96,7 @@ def prospect_block(p: dict) -> str:
 def write_daily(out_dir: Path, results: list[dict], meta: dict) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     by_queue = {q: sorted([p for p in results if p["queue"] == q], key=lambda p: -(p.get("fit_score") or 0))
-                for q in (READY, KVK_CHECK, MANUAL_PHONE, REJECTED)}
+                for q in (READY, KVK_CHECK, MANUAL_REVIEW, REJECTED)}
     for q, rows in by_queue.items():
         write_queue_csv(out_dir / f"{q.lower()}.csv", rows)
 
@@ -95,7 +104,9 @@ def write_daily(out_dir: Path, results: list[dict], meta: dict) -> Path:
     lines = [f"# OrseBusiness Daily Prospecting Report — {meta.get('date')}", "",
              "Local dry run. Nothing was sent, drafted or stored outside this machine.", "",
              f"Domain pool: {meta.get('pool_size')} · skipped (processed < 30 days ago or cooling down): "
-             f"{meta.get('skipped_recently_processed')}", "", "| Metric | Count |", "|---|---|"]
+             f"{meta.get('skipped_recently_processed')}",
+             f"Processing time: {meta.get('elapsed_min', '?')} min ({meta.get('sec_per_domain', '?')} s/domain)",
+             "", "| Metric | Count |", "|---|---|"]
     lines += [f"| {k} | {v} |" for k, v in m.items()]
     lines += ["", "## Ready for outreach (B.V. + homeowner + role email)", ""]
     lines += [prospect_block(p) for p in by_queue[READY]] or ["_none today_", ""]
@@ -108,7 +119,7 @@ def write_daily(out_dir: Path, results: list[dict], meta: dict) -> Path:
         lines += ["_none today_", ""]
     lines += ["## Manual / phone (not eligible for cold email)", ""]
     lines += [f"- {p.get('business_name')} ({p.get('city') or '?'}) {p.get('final_url') or p.get('website')} — {p.get('queue_reason')}"
-              for p in by_queue[MANUAL_PHONE]] or ["_none_"]
+              for p in by_queue[MANUAL_REVIEW]] or ["_none_"]
     lines += ["", "## Rejection reasons", ""]
     reasons = Counter(r.split("(")[0].split(":")[0].strip() for p in by_queue[REJECTED] for r in p["disqualify_reasons"][:1])
     lines += [f"- {k}: {v}" for k, v in reasons.most_common()]

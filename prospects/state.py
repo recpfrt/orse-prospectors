@@ -39,9 +39,14 @@ create index if not exists prospects_email on prospects(public_email);
 create index if not exists prospects_business on prospects(business_key);
 create table if not exists kvk_reviews (
   domain text primary key,
-  result text not null check (result in ('bv', 'not_bv')),
+  result text not null check (result in ('bv', 'not_bv', 'uncertain')),
   kvk_number text,
+  entity_match text check (entity_match in ('yes', 'no', 'unknown')),
+  active text check (active in ('yes', 'no', 'unknown')),
+  genuine_installer text check (genuine_installer in ('yes', 'no', 'unknown')),
+  homeowner_ok text check (homeowner_ok in ('yes', 'no', 'unknown')),
   note text,
+  review_batch text,
   reviewed_at text not null
 );
 """
@@ -55,8 +60,21 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
+    _migrate(con)
     con.executescript(SCHEMA)
     return con
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    """kvk_reviews v1 (bv/not_bv only) -> v2 (adds uncertain + the CEO's verification checks)."""
+    cols = [r[1] for r in con.execute("pragma table_info(kvk_reviews)")]
+    if cols and "entity_match" not in cols:
+        con.execute("alter table kvk_reviews rename to kvk_reviews_v1")
+        con.executescript(SCHEMA)
+        con.execute("""insert into kvk_reviews (domain, result, kvk_number, note, reviewed_at)
+                       select domain, result, kvk_number, note, reviewed_at from kvk_reviews_v1""")
+        con.execute("drop table kvk_reviews_v1")
+        con.commit()
 
 
 def business_key(name: str | None, city: str | None) -> str | None:
@@ -143,12 +161,21 @@ def load_prospects(con: sqlite3.Connection, queue: str | None = None) -> list[di
     return [json.loads(r["data"]) for r in con.execute(sql, args)]
 
 
-def record_kvk_review(con: sqlite3.Connection, domain: str, result: str, kvk_number: str | None, note: str | None) -> None:
+def record_kvk_review(con: sqlite3.Connection, domain: str, result: str, kvk_number: str | None = None,
+                      note: str | None = None, entity_match: str = "unknown", active: str = "unknown",
+                      genuine_installer: str = "unknown", homeowner_ok: str = "unknown",
+                      review_batch: str | None = None) -> None:
     con.execute(
-        """insert into kvk_reviews (domain, result, kvk_number, note, reviewed_at) values (?, ?, ?, ?, ?)
+        """insert into kvk_reviews (domain, result, kvk_number, entity_match, active, genuine_installer,
+                                    homeowner_ok, note, review_batch, reviewed_at)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            on conflict(domain) do update set result = excluded.result, kvk_number = excluded.kvk_number,
-             note = excluded.note, reviewed_at = excluded.reviewed_at""",
-        (domain, result, kvk_number, note, now()),
+             entity_match = excluded.entity_match, active = excluded.active,
+             genuine_installer = excluded.genuine_installer, homeowner_ok = excluded.homeowner_ok,
+             note = excluded.note, review_batch = coalesce(excluded.review_batch, kvk_reviews.review_batch),
+             reviewed_at = excluded.reviewed_at""",
+        (domain, result, kvk_number, entity_match, active, genuine_installer, homeowner_ok, note,
+         review_batch, now()),
     )
 
 

@@ -8,7 +8,7 @@ Queues (CEO policy, 2026-10-06; email ONLY for confirmed B.V.):
                + public role email + fit >= FIT_THRESHOLD
   KVK_CHECK    homeowner fit + public role email + fit >= FIT_THRESHOLD, legal form unknown or
                B.V. evidence ambiguous -> CEO verifies on kvk.nl by hand
-  MANUAL_PHONE relevant business, not eligible for cold email (not B.V., no role email, mixed clientele)
+  MANUAL_REVIEW relevant business, not eligible for cold email (not B.V., no role email, mixed clientele)
   REJECTED     any exclusion, or fit below threshold. Every rejection carries an explicit reason.
 """
 
@@ -18,10 +18,22 @@ from .places import landing_page_mismatch
 FIT_THRESHOLD = 50
 BV_BONUS = 10
 
-READY, KVK_CHECK, MANUAL_PHONE, REJECTED = "READY", "KVK_CHECK", "MANUAL_PHONE", "REJECTED"
+# READY / KVK_CHECK need concrete residential evidence, not just "homeowner" by a narrow margin:
+# at least MIN_RESIDENTIAL distinct terms from this list must appear on the site.
+RESIDENTIAL_CORE = {
+    "particulier", "particulieren", "uw woning", "uw huis", "thuis", "huiseigenaar", "huiseigenaren",
+    "huurder", "woonhuis", "woningeigenaar", "cv-ketel", "cv ketel", "ketelonderhoud", "ketel vervangen",
+    "lekkage", "verstopping", "ontstoppen", "storing", "boiler", "badkamer", "badkamerrenovatie", "toilet",
+    "groepenkast", "meterkast", "warmtepomp", "radiator", "vloerverwarming", "geiser", "laadpaal thuis",
+}
+MIN_RESIDENTIAL = 2
+
+READY, KVK_CHECK, MANUAL_REVIEW, REJECTED = "READY", "KVK_CHECK", "MANUAL_REVIEW", "REJECTED"
 
 
 def _exclusions(p: dict) -> list[str]:
+    if p.get("kvk_genuine_installer") == "no":
+        return ["CEO KvK review: not a genuine local installer" + (f" ({p['kvk_review_note']})" if p.get("kvk_review_note") else "")]
     if p.get("duplicate_of"):
         return [f"duplicate business ({p['duplicate_of']})"]
     if p.get("robots_blocked"):
@@ -112,13 +124,37 @@ def _fit(p: dict) -> tuple[int, list[str]]:
     return min(total, 100), reasons
 
 
+def residential_terms(p: dict) -> list[str]:
+    found = [e.rpartition("×")[0] for e in p.get("customer_type_evidence", {}).get("homeowner", [])]
+    return sorted({t for t in found if t in RESIDENTIAL_CORE})
+
+
+def clear_homeowner(p: dict) -> tuple[bool, str]:
+    """Homeowner classification AND concrete residential evidence AND commercial signals not close behind."""
+    if p.get("customer_type") != "homeowner":
+        return False, f"customer type '{p.get('customer_type')}' (not clearly homeowner)"
+    if p.get("kvk_homeowner_ok") == "no":
+        return False, "CEO review: homeowner fit not reasonable"
+    terms = residential_terms(p)
+    if len(terms) < MIN_RESIDENTIAL:
+        return False, f"homeowner evidence too thin ({', '.join(terms) or 'no core residential terms'})"
+    home, biz = p.get("homeowner_signal") or 0, p.get("business_signal") or 0
+    if biz and biz * 2 > home:
+        return False, f"commercial signals too strong (homeowner {home} vs business {biz})"
+    return True, ", ".join(terms[:4])
+
+
 def bv_status(p: dict) -> str:
     """'confirmed' | 'ambiguous' | 'unknown' | 'not_bv'"""
     review = p.get("kvk_review")
     if review == "bv":
+        if p.get("kvk_entity_match") == "no" or p.get("kvk_active") == "no":
+            return "review_problem"
         return "confirmed"
     if review == "not_bv":
         return "not_bv"
+    if review == "uncertain":
+        return "review_uncertain"
     if p.get("legal_form") == "bv":
         # A missing confidence is never assumed to be strong.
         return "confirmed" if p.get("legal_form_confidence") == "strong" else "ambiguous"
@@ -143,25 +179,29 @@ def score(p: dict) -> dict:
         excluded.append(f"fit score {fit} below threshold {FIT_THRESHOLD}")
 
     bv = bv_status(p)
-    homeowner = p.get("customer_type") == "homeowner"
+    homeowner, homeowner_why = clear_homeowner(p)
     email = bool(p.get("public_email"))
 
     if excluded:
         queue, why = REJECTED, "; ".join(excluded)
     elif bv == "confirmed" and homeowner and email:
         via = "manual KvK verification" if p.get("kvk_review") == "bv" else "website evidence"
-        queue, why = READY, f"B.V. confirmed ({via}), homeowner fit, public role email, fit {fit}"
+        queue, why = READY, f"B.V. confirmed ({via}), clear homeowner fit ({homeowner_why}), public role email, fit {fit}"
     elif homeowner and email and bv in ("unknown", "ambiguous"):
-        queue, why = KVK_CHECK, "homeowner fit + public role email; " + missing_bv_evidence(p)
+        queue, why = KVK_CHECK, f"clear homeowner fit ({homeowner_why}) + public role email; " + missing_bv_evidence(p)
     else:
         gaps = []
         if bv == "not_bv":
             gaps.append("not a B.V. (" + ("KvK check" if p.get("kvk_review") else str(p.get("legal_form"))) + ")")
+        if bv == "review_uncertain":
+            gaps.append("KvK check uncertain")
+        if bv == "review_problem":
+            gaps.append("KvK check: legal entity does not match or business inactive")
         if not email:
             gaps.append("no public role email")
         if not homeowner:
-            gaps.append(f"customer type '{p.get('customer_type')}' (not clearly homeowner)")
-        queue, why = MANUAL_PHONE, "relevant business, not eligible for cold email: " + ", ".join(gaps or ["legal form unknown"])
+            gaps.append(homeowner_why)
+        queue, why = MANUAL_REVIEW, "not eligible for cold email: " + ", ".join(gaps or ["insufficient evidence"])
 
     qualification = 0 if excluded else min(fit + (BV_BONUS if bv == "confirmed" else 0), 100)
     return {
@@ -174,7 +214,7 @@ def score(p: dict) -> dict:
         "score_reasons": reasons + ([f"+{BV_BONUS} B.V. confirmed"] if bv == "confirmed" and not excluded else []),
         "disqualify_reasons": excluded,
         # compatibility with drafts.py and earlier reports
-        "status": {READY: "qualified", KVK_CHECK: "kvk_check", MANUAL_PHONE: "manual_review"}.get(queue, "disqualified"),
+        "status": {READY: "qualified", KVK_CHECK: "kvk_check", MANUAL_REVIEW: "manual_review"}.get(queue, "disqualified"),
         "outreach_channel": "email" if queue == READY else ("none" if queue == REJECTED else "phone_or_contact_form"),
         "strong_prospect": queue == READY,
     }

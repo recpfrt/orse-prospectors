@@ -13,7 +13,9 @@ def apply_review(con, p: dict) -> dict:
     review = state.kvk_review(con, p["domain"])
     if review:
         p = {**p, "kvk_review": review["result"], "kvk_review_number": review["kvk_number"],
-             "kvk_review_note": review["note"]}
+             "kvk_review_note": review["note"], "kvk_entity_match": review["entity_match"],
+             "kvk_active": review["active"], "kvk_genuine_installer": review["genuine_installer"],
+             "kvk_homeowner_ok": review["homeowner_ok"]}
     return p
 
 
@@ -48,6 +50,7 @@ def run_daily(con, cc_tsv: str, batch: int, seed: int) -> tuple[list[dict], dict
     blocked_domains, blocked_emails = _red_list()
     pool = [c for c in pool if c["domain"] not in blocked_domains]
     chosen, skipped_recent = select_batch(con, pool, batch)
+    started = dt.datetime.now()
     results = []
     for i, c in enumerate(chosen, 1):
         print(f"[daily] {i}/{len(chosen)} {c['domain']}", file=sys.stderr)
@@ -59,8 +62,13 @@ def run_daily(con, cc_tsv: str, batch: int, seed: int) -> tuple[list[dict], dict
         results.append(p)
     network_sweep(con)
     results = [_reload(con, r["domain"]) for r in results]  # pick up network flags set by the sweep
+    elapsed = (dt.datetime.now() - started).total_seconds()
+    attempted = {r["domain"] for r in con.execute("select domain from domains")}
     meta = {"pool_size": len(pool), "skipped_recently_processed": skipped_recent,
-            "date": dt.date.today().isoformat()}
+            "date": dt.date.today().isoformat(), "started": started.isoformat(timespec="seconds"),
+            "elapsed_min": round(elapsed / 60, 1),
+            "sec_per_domain": round(elapsed / max(len(results), 1), 1),
+            "pool_remaining": sum(1 for c in pool if c["domain"] not in attempted)}
     return results, meta
 
 

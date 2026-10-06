@@ -10,7 +10,8 @@ def base(**kw):
          "branches": None, "team_signal": "small", "booking_tools": [], "booking_phrases": [],
          "online_booking": False, "emergency_service": True, "legal_form": "bv",
          "website_quality": 2, "public_email": "info@bedrijf.nl", "kvk_number": "12345678",
-         "legal_form_confidence": "strong"}
+         "legal_form_confidence": "strong", "homeowner_signal": 20, "business_signal": 0,
+         "customer_type_evidence": {"homeowner": ["cv-ketel×3", "lekkage×2"], "business": []}}
     p.update(kw)
     return p
 
@@ -132,15 +133,15 @@ class TestPlaces(unittest.TestCase):
 
 
 class TestQueues(unittest.TestCase):
-    H = dict(customer_type="homeowner", customer_type_evidence={"homeowner": ["cv-ketel×5"]})
+    H = dict(customer_type="homeowner", customer_type_evidence={"homeowner": ["cv-ketel×5", "particulieren×2"]})
 
     def q(self, **kw):
         return score(base(**{**self.H, **kw}))["queue"]
 
     def test_ready_requires_strong_bv_homeowner_email(self):
         self.assertEqual(self.q(), "READY")
-        self.assertEqual(self.q(customer_type="mixed"), "MANUAL_PHONE")
-        self.assertEqual(self.q(public_email=None), "MANUAL_PHONE")
+        self.assertEqual(self.q(customer_type="mixed"), "MANUAL_REVIEW")
+        self.assertEqual(self.q(public_email=None), "MANUAL_REVIEW")
 
     def test_unknown_or_ambiguous_bv_goes_to_kvk_check(self):
         self.assertEqual(self.q(legal_form="unknown"), "KVK_CHECK")
@@ -150,11 +151,11 @@ class TestQueues(unittest.TestCase):
 
     def test_manual_kvk_verification_moves_queue(self):
         self.assertEqual(self.q(legal_form="unknown", kvk_review="bv"), "READY")
-        self.assertEqual(self.q(legal_form="unknown", kvk_review="not_bv"), "MANUAL_PHONE")
+        self.assertEqual(self.q(legal_form="unknown", kvk_review="not_bv"), "MANUAL_REVIEW")
 
     def test_non_bv_never_ready(self):
         for form in ("vof", "eenmanszaak"):
-            self.assertEqual(self.q(legal_form=form), "MANUAL_PHONE")
+            self.assertEqual(self.q(legal_form=form), "MANUAL_REVIEW")
 
     def test_safeguard_exclusions_have_reasons(self):
         cases = {
@@ -186,7 +187,7 @@ class TestKvkQueueRoundTrip(unittest.TestCase):
                        business_name="Voorbeeld Installaties", city="Utrecht", is_installer=True)
             pipeline.import_previous(con, [row])
             self.assertEqual(state.load_prospects(con, "KVK_CHECK")[0]["domain"], "voorbeeld.nl")
-            for result, expected in (("bv", "READY"), ("not_bv", "MANUAL_PHONE")):
+            for result, expected in (("bv", "READY"), ("not_bv", "MANUAL_REVIEW")):
                 state.record_kvk_review(con, "voorbeeld.nl", result, "12345678", None)
                 p = json.loads(con.execute("select data from prospects").fetchone()["data"])
                 p = score({k: v for k, v in p.items() if k not in ("queue", "disqualify_reasons")})
@@ -276,3 +277,26 @@ class TestNetworkSweep(unittest.TestCase):
             self.assertEqual(pipeline.network_sweep(con), 2)
             self.assertEqual({p["queue"] for p in state.load_prospects(con)}, {"REJECTED"})
             con.close()
+
+
+class TestPhase2Rules(unittest.TestCase):
+    H = dict(customer_type="homeowner")
+
+    def test_thin_homeowner_evidence_is_manual_review(self):
+        r = score(base(customer_type="homeowner", customer_type_evidence={"homeowner": ["airco×5"], "business": []}))
+        self.assertEqual(r["queue"], "MANUAL_REVIEW")
+        self.assertIn("too thin", r["queue_reason"])
+
+    def test_commercial_signals_close_behind_block_ready(self):
+        r = score(base(customer_type="homeowner", homeowner_signal=20, business_signal=12))
+        self.assertEqual(r["queue"], "MANUAL_REVIEW")
+        self.assertIn("commercial signals", r["queue_reason"])
+
+    def test_kvk_review_outcomes(self):
+        common = dict(customer_type="homeowner", legal_form="unknown")
+        self.assertEqual(score(base(**common, kvk_review="bv", kvk_entity_match="yes", kvk_active="yes"))["queue"], "READY")
+        self.assertEqual(score(base(**common, kvk_review="bv", kvk_entity_match="no"))["queue"], "MANUAL_REVIEW")
+        self.assertEqual(score(base(**common, kvk_review="bv", kvk_active="no"))["queue"], "MANUAL_REVIEW")
+        self.assertEqual(score(base(**common, kvk_review="uncertain"))["queue"], "MANUAL_REVIEW")
+        self.assertEqual(score(base(**common, kvk_review="bv", kvk_homeowner_ok="no"))["queue"], "MANUAL_REVIEW")
+        self.assertEqual(score(base(**common, kvk_review="bv", kvk_genuine_installer="no"))["queue"], "REJECTED")
