@@ -27,6 +27,9 @@ RESIDENTIAL_CORE = {
     "groepenkast", "meterkast", "warmtepomp", "radiator", "vloerverwarming", "geiser", "laadpaal thuis",
 }
 MIN_RESIDENTIAL = 2
+# A mixed-audience business still passes when homeowner work clearly dominates (Batch 2 diagnosis).
+MIXED_MIN_HOMEOWNER_RATIO = 3      # homeowner_signal >= 3 x business_signal (inclusive)
+MIXED_MIN_RESIDENTIAL = 3          # and at least 3 distinct residential terms
 
 READY, KVK_CHECK, MANUAL_REVIEW, REJECTED = "READY", "KVK_CHECK", "MANUAL_REVIEW", "REJECTED"
 
@@ -143,6 +146,8 @@ def clear_homeowner(p: dict) -> tuple[bool, str]:
         return False, f"commercial signals too strong (homeowner {home} vs business {biz})"
     dual = dual_audience_evidence(p)
     if dual:
+        if home >= MIXED_MIN_HOMEOWNER_RATIO * biz and len(terms) >= MIXED_MIN_RESIDENTIAL:
+            return True, f"{', '.join(terms[:4])}; also serves business customers ({', '.join(dual[:3])})"
         return False, f"mixed audience: serves business customers too ({', '.join(dual[:3])})"
     return True, ", ".join(terms[:4])
 
