@@ -96,3 +96,16 @@ class TestCustomerType(unittest.TestCase):
         self.assertTrue(score(base(customer_type="homeowner"))["strong_prospect"])
         self.assertFalse(score(base(customer_type="mixed"))["strong_prospect"])
         self.assertFalse(score(base(customer_type="homeowner", legal_form="vof"))["strong_prospect"])
+
+
+class TestNewExclusions(unittest.TestCase):
+    def test_broker_network_excluded(self):
+        r = score(base(broker_markers=["in heel nederland", "aangesloten vakmensen"]))
+        self.assertEqual(r["status"], "disqualified")
+
+    def test_webshop_excluded(self):
+        self.assertEqual(score(base(webshop_markers=["winkelwagen", "afrekenen"]))["status"], "disqualified")
+
+    def test_commoncrawl_requires_dutch_address(self):
+        r = score(base(source="commoncrawl", nl_address_found=False))
+        self.assertEqual(r["status"], "disqualified")

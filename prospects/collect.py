@@ -137,3 +137,36 @@ def dedupe(candidates: list[dict], blocked_domains: set[str], blocked_emails: se
         kept.append(c)
     stats["kept"] = len(kept)
     return kept, stats
+
+
+DOMAIN_CATEGORY = [
+    (re.compile(r"loodgiet|sanitair|riool|ontstop|lekkage"), "plumber"),
+    (re.compile(r"elektr|electr"), "electrician"),
+    (re.compile(r"install|verwarm|klimaat|warmtepomp|airco|cv"), "hvac"),
+]
+
+
+def collect_commoncrawl(tsv_path: str, sample: int, seed: int, exclude_domains: set[str]) -> list[dict]:
+    """Candidates from the Common Crawl domain list (pre-filtered to .nl trade keywords).
+    Only the domain is known here; name and city come from the business's own website."""
+    import random
+
+    domains = []
+    for line in open(tsv_path, encoding="utf-8"):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) < 5:
+            continue
+        domain = ".".join(reversed(parts[4].split(".")))
+        if domain.count(".") != 1 or domain in exclude_domains:
+            continue  # registrable .nl domains only
+        domains.append(domain)
+    random.Random(seed).shuffle(domains)
+    out = []
+    for domain in domains[:sample]:
+        category = next((c for p, c in DOMAIN_CATEGORY if p.search(domain)), "hvac")
+        out.append({
+            "osm_id": None, "business_name": None, "craft": None, "matched_by": "domain_keyword",
+            "service_category": category, "website": f"https://{domain}/", "domain": domain,
+            "city": None, "osm_email": None, "osm_phone": None, "source": "commoncrawl",
+        })
+    return out

@@ -20,8 +20,8 @@ from prospects import collect, drafts, enrich, score
 OUT = Path(__file__).parent / "data" / "out"
 RED_LIST = Path(__file__).parent / "data" / "do_not_contact.csv"   # local stand-in until Supabase is approved
 
-CSV_FIELDS = ["status", "outreach_channel", "qualification_score", "business_name", "city", "service_category",
-              "website", "public_email", "email_source_url", "legal_form", "kvk_number", "online_booking",
+CSV_FIELDS = ["status", "outreach_channel", "strong_prospect", "qualification_score", "customer_type", "business_name", "city", "service_category",
+              "website", "public_email", "email_source_url", "legal_form", "legal_form_evidence", "kvk_number", "online_booking",
               "emergency_service", "team_signal", "website_quality", "score_reasons", "disqualify_reasons"]
 
 
@@ -38,8 +38,22 @@ def load_red_list() -> tuple[set[str], set[str]]:
 
 def cmd_dryrun(args):
     OUT.mkdir(parents=True, exist_ok=True)
-    label = "province" if args.city == "*" else args.city.lower()
+    label = ("cc" if args.source == "commoncrawl" else
+             "province" if args.city == "*" else args.city.lower())
     stamp = f"{datetime.date.today():%Y%m%d}-{label}"
+
+    if args.source == "commoncrawl":
+        known = set()
+        for f in OUT.glob("*-scored.json"):
+            known |= {r["domain"] for r in json.loads(f.read_text(encoding="utf-8"))}
+        raw = collect.collect_commoncrawl(args.cc_tsv, args.sample, args.seed, set())
+        source = "commoncrawl"
+        cross_source_dupes = [c for c in raw if c["domain"] in known]
+        raw = [c for c in raw if c["domain"] not in known]
+        blocked_domains, blocked_emails = load_red_list()
+        candidates, dedupe_stats = collect.dedupe(raw, blocked_domains, blocked_emails)
+        dedupe_stats["duplicate_of_earlier_run"] = len(cross_source_dupes)
+        return _enrich_score_report(args, stamp, source, raw, candidates, dedupe_stats)
 
     source = "overpass"
     try:
@@ -57,6 +71,12 @@ def cmd_dryrun(args):
 
     blocked_domains, blocked_emails = load_red_list()
     candidates, dedupe_stats = collect.dedupe(raw, blocked_domains, blocked_emails)
+    for c in raw:
+        c.setdefault("source", "osm" if source == "overpass" else "geofabrik")
+    return _enrich_score_report(args, stamp, source, raw, candidates, dedupe_stats)
+
+
+def _enrich_score_report(args, stamp, source, raw, candidates, dedupe_stats):
     candidates = candidates[: args.max_sites]
     print(f"[collect] source={source} raw={len(raw)} kept={len(candidates)} {dict(dedupe_stats)}", file=sys.stderr)
 
@@ -75,7 +95,7 @@ def cmd_dryrun(args):
                         "disqualify_reasons": "; ".join(p["disqualify_reasons"])})
 
     stats = {
-        "city": args.city, "source": source, "raw_osm_entries": len(raw),
+        "city": getattr(args, "city", None), "source": source, "raw_osm_entries": len(raw),
         "by_category_raw": dict(Counter(c["service_category"] for c in raw)),
         "dedupe": dict(dedupe_stats), "sites_enriched": len(enriched),
         "reachable": sum(1 for p in enriched if p["fetch_status"] == 200),
@@ -83,7 +103,10 @@ def cmd_dryrun(args):
         "with_public_role_email": sum(1 for p in enriched if p.get("public_email")),
         "legal_form": dict(Counter(p.get("legal_form", "n/a") for p in enriched)),
         "online_booking": sum(1 for p in enriched if p.get("online_booking")),
+        "customer_type": dict(Counter(p.get("customer_type", "n/a") for p in enriched)),
+        "probable_bv": sum(1 for p in enriched if p.get("legal_form") == "bv"),
         "status": dict(Counter(p["status"] for p in scored)),
+        "strong_prospects": sum(1 for p in scored if p.get("strong_prospect")),
         "outreach_channel": dict(Counter(p["outreach_channel"] for p in scored)),
         "top_disqualify_reasons": Counter(re.sub(r"\(.*?\)|: .*", "", r).strip()
                                           for p in scored for r in p["disqualify_reasons"]).most_common(8),
@@ -122,7 +145,11 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("dryrun")
-    d.add_argument("--city", required=True)
+    d.add_argument("--city", default="*")
+    d.add_argument("--source", choices=["osm", "commoncrawl"], default="osm")
+    d.add_argument("--cc-tsv", default="data/raw/cc/nl-trade-domains.tsv")
+    d.add_argument("--sample", type=int, default=120)
+    d.add_argument("--seed", type=int, default=20261006)
     d.add_argument("--pbf")
     d.add_argument("--max-sites", type=int, default=80)
     d.add_argument("--skip-overpass", action="store_true")

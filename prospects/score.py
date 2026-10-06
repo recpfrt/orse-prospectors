@@ -27,6 +27,12 @@ def score(p: dict) -> dict:
             excluded.append(f"large company ({p.get('team_count')} staff)")
         if p.get("booking_tools"):
             excluded.append("already uses an online booking tool: " + ", ".join(p["booking_tools"]))
+        if len(p.get("broker_markers") or []) >= 2:
+            excluded.append("lead-broker / referral network (" + ", ".join(p["broker_markers"][:3]) + ")")
+        if len(p.get("webshop_markers") or []) >= 2:
+            excluded.append("webshop / retailer (" + ", ".join(p["webshop_markers"][:3]) + ")")
+        if p.get("source") == "commoncrawl" and not p.get("nl_address_found"):
+            excluded.append("no Dutch business address (postcode) on website")
         if p.get("customer_type") == "business":
             ev = ", ".join(p.get("customer_type_evidence", {}).get("business", [])[:4])
             excluded.append(f"serves mainly commercial/industrial clients ({ev})")

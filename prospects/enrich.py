@@ -115,6 +115,37 @@ def _subpage_links(base_url: str, page_html: str, site_domain: str) -> list[str]
     return links[: config.MAX_PAGES_PER_SITE - 1]
 
 
+
+POSTCODE_CITY_RE = re.compile(r"\b[1-9]\d{3}\s?(?!SA|SD|SS)[A-Z]{2}\s{1,3}([A-Z][a-zA-Z'\-]+(?:[ \-][A-Z][a-zA-Z'\-]+)?)")
+# Lead-broker / referral networks sell homeowner requests to tradespeople; not our target.
+BROKER_PHRASES = ["aangesloten vakman", "aangesloten vakmensen", "aangesloten bedrijven", "ons netwerk van",
+                  "landelijk netwerk", "in heel nederland", "door heel nederland", "landelijk dekkend",
+                  "wij koppelen", "vergelijk offertes", "gratis offertes", "partners in uw regio",
+                  "binnen 30 minuten", "in uw regio actief", "vakspecialisten in de buurt"]
+WEBSHOP_MARKERS = ["winkelwagen", "winkelmand", "in mijn winkelwagen", "add to cart", "toevoegen aan winkelwagen",
+                   "afrekenen", "woocommerce", "shopify", "gratis verzending", "bezorging"]
+
+
+def site_name(page_html: str, domain: str) -> str:
+    m = re.search(r'<meta[^>]+property=["\']og:site_name["\'][^>]+content=["\']([^"\']{2,80})', page_html, re.I)
+    if m:
+        return htmllib.unescape(m.group(1)).strip()
+    m = re.search(r"<title[^>]*>(.*?)</title>", page_html, re.I | re.S)
+    if m:
+        title = re.sub(r"\s+", " ", htmllib.unescape(m.group(1))).strip()
+        parts = [x.strip() for x in re.split(r"\s[|\-–—:]\s", title) if x.strip()]
+        generic = {"home", "homepage", "welkom", "contact", "startpagina"}
+        parts = [x for x in parts if x.lower() not in generic]
+        if parts:
+            return min(parts, key=len) if len(parts) > 1 and len(parts[0]) > 45 else parts[0]
+    return domain
+
+
+def postcode_city(text: str) -> str | None:
+    m = POSTCODE_CITY_RE.search(text)
+    return m.group(1) if m else None
+
+
 def enrich(candidate: dict) -> dict:
     site = candidate["website"]
     domain = candidate["domain"]
@@ -149,7 +180,7 @@ def enrich(candidate: dict) -> dict:
 
     kvk = KVK_RE.search(all_text)
     legal_form, legal_evidence = detect_legal_form_with_evidence(
-        all_text, candidate.get("business_name"), final_domain)
+        all_text, candidate.get("business_name") or site_name(home, final_domain), final_domain)
     team_size, team_n = detect_team(all_text)
     branches = [int(n) for n in BRANCHES_RE.findall(all_text)]
     tools = [m for m in config.BOOKING_TOOL_MARKERS if m in lower_html]
@@ -158,7 +189,15 @@ def enrich(candidate: dict) -> dict:
     dutch_words = {"de", "het", "een", "en", "van", "voor", "uw", "wij", "met", "op", "is", "zijn", "u", "onze", "ook"}
     dutch_ratio = sum(w in dutch_words for w in words) / max(len(words), 1)
 
+    business_name = candidate.get("business_name") or site_name(home, final_domain)
+    city = candidate.get("city") or postcode_city(all_text)
+    webshop_hits = [m for m in WEBSHOP_MARKERS if m in lower_text or m in lower_html]
     result.update({
+        "business_name": business_name,
+        "city": city,
+        "nl_address_found": bool(POSTCODE_CITY_RE.search(all_text)),
+        "webshop_markers": webshop_hits,
+        "broker_markers": [m for m in BROKER_PHRASES if m in lower_text],
         "final_url": final_url,
         "public_email": emails[0] if emails else None,
         "email_source_url": email_source,
