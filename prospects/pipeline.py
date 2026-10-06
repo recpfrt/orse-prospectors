@@ -1,6 +1,7 @@
 """Daily local prospecting pipeline. Writes only to data/state.sqlite and data/out/. No outreach."""
 
 import datetime as dt
+import json
 import sys
 
 from . import collect, enrich, state
@@ -56,6 +57,8 @@ def run_daily(con, cc_tsv: str, batch: int, seed: int) -> tuple[list[dict], dict
             state.save_prospect(con, p)
             con.commit()
         results.append(p)
+    network_sweep(con)
+    results = [_reload(con, r["domain"]) for r in results]  # pick up network flags set by the sweep
     meta = {"pool_size": len(pool), "skipped_recently_processed": skipped_recent,
             "date": dt.date.today().isoformat()}
     return results, meta
@@ -97,3 +100,27 @@ def import_previous(con, rows: list[dict]) -> int:
         n += 1
     con.commit()
     return n
+
+
+STRIP = ("queue", "queue_reason", "status", "outreach_channel", "strong_prospect", "disqualify_reasons", "score_reasons")
+
+
+def network_sweep(con) -> int:
+    """A KvK number shown on 2+ websites = one company running several sites (broker/landing-page network).
+    Every domain in that group, including the first one seen, is flagged and re-scored."""
+    groups = con.execute(
+        "select json_extract(data, '$.kvk_number') k, count(*) n from prospects "
+        "where k is not null group by k having n > 1").fetchall()
+    flagged = 0
+    for g in groups:
+        for row in con.execute("select data from prospects where json_extract(data, '$.kvk_number') = ?", (g["k"],)).fetchall():
+            p = {k: v for k, v in json.loads(row["data"]).items() if k not in STRIP}
+            p["network_kvk_count"] = g["n"]
+            state.save_prospect(con, score(apply_review(con, p)))
+            flagged += 1
+    con.commit()
+    return flagged
+
+
+def _reload(con, domain: str) -> dict:
+    return json.loads(con.execute("select data from prospects where domain = ?", (domain,)).fetchone()["data"])

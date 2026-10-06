@@ -127,7 +127,20 @@ WEBSHOP_MARKERS = ["winkelwagen", "winkelmand", "in mijn winkelwagen", "add to c
                    "afrekenen", "woocommerce", "shopify", "gratis verzending", "bezorging"]
 
 
+GENERIC_NAMES = {"bedrijf", "home", "homepage", "welkom", "index", "contact", "website", "startpagina"}
+
+
 def site_name(page_html: str, domain: str) -> str:
+    name = _raw_site_name(page_html, domain)
+    label = domain.split(".")[0]
+    # generic words, or a different website's name (e.g. the web agency's credit) -> use the domain
+    if name.lower().strip() in GENERIC_NAMES or len(name.strip()) < 3 or (
+            re.fullmatch(r"[\w\-]+\.(nl|com|eu)", name.strip().lower()) and label not in name.lower()):
+        return domain
+    return name
+
+
+def _raw_site_name(page_html: str, domain: str) -> str:
     m = re.search(r'<meta[^>]+property=["\']og:site_name["\'][^>]+content=["\']([^"\']{2,80})', page_html, re.I)
     if m:
         return htmllib.unescape(m.group(1)).strip()
@@ -239,6 +252,8 @@ def enrich(candidate: dict) -> dict:
         "business_name": business_name,
         "city": city,
         "nl_address_found": bool(POSTCODE_CITY_RE.search(all_text)),
+        # boolean only: the phone number itself is not stored
+        "nl_phone_found": bool(re.search(r"(?:\+31|0031|\b0)[1-9](?:[\s\-]?\d){8}\b", all_text)),
         "webshop_markers": webshop_hits,
         "broker_markers": [m for m in BROKER_PHRASES if m in lower_text],
         "franchise_markers": [m for m in FRANCHISE_PHRASES if m in lower_text],

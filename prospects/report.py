@@ -22,8 +22,16 @@ def bv_evidence_text(p: dict) -> str:
 
 def kvk_search_url(p: dict) -> str:
     """Link for the CEO to open by hand. The pipeline never queries kvk.nl itself."""
-    q = p.get("kvk_number") or p.get("business_name") or p["domain"]
+    q = p.get("kvk_number") or short_name(p)
     return "https://www.kvk.nl/zoeken/?source=all&q=" + urllib.parse.quote(str(q))
+
+
+def short_name(p: dict) -> str:
+    """Core business name for a KvK search: text before the first separator, at most 4 words."""
+    import re
+    name = str(p.get("business_name") or p["domain"])
+    name = re.split(r"\s[|\-–—:]\s|\s\|", name)[0]
+    return " ".join(name.split()[:4])
 
 
 def metrics(results: list[dict]) -> dict:

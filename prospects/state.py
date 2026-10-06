@@ -97,17 +97,29 @@ def record_attempt(con: sqlite3.Connection, domain: str, source: str, status: in
 
 
 def find_duplicate(con: sqlite3.Connection, p: dict) -> str | None:
-    """Another domain already holding the same public email or the same business (name + city)."""
+    """An EARLIER-seen domain with the same public email, KvK number, or business name + town.
+    Only earlier domains count, so the first domain of a business keeps its place in the queues."""
+    seen = con.execute("select first_seen from domains where domain = ?", (p["domain"],)).fetchone()
+    first_seen = seen["first_seen"] if seen else now()
+    earlier = ("join domains d on d.domain = prospects.domain "
+               "where prospects.domain != ? and (d.first_seen < ? or (d.first_seen = ? and prospects.domain < ?))")
+    args = (p["domain"], first_seen, first_seen, p["domain"])
     email = (p.get("public_email") or "").lower()
     if email:
-        row = con.execute("select domain from prospects where lower(public_email) = ? and domain != ?",
-                          (email, p["domain"])).fetchone()
+        row = con.execute(f"select prospects.domain from prospects {earlier} and lower(public_email) = ?",
+                          args + (email,)).fetchone()
         if row:
             return f"same public email as {row['domain']}"
+    kvk = p.get("kvk_number")
+    if kvk:
+        row = con.execute(f"select prospects.domain from prospects {earlier} "
+                          "and json_extract(data, '$.kvk_number') = ?", args + (kvk,)).fetchone()
+        if row:
+            return f"same KvK number as {row['domain']} (likely one company behind several websites)"
     key = business_key(p.get("business_name"), p.get("city"))
     if key:
-        row = con.execute("select domain from prospects where business_key = ? and domain != ?",
-                          (key, p["domain"])).fetchone()
+        row = con.execute(f"select prospects.domain from prospects {earlier} and business_key = ?",
+                          args + (key,)).fetchone()
         if row:
             return f"same business name + town as {row['domain']}"
     return None

@@ -12,6 +12,7 @@ Queues (CEO policy, 2026-10-06; email ONLY for confirmed B.V.):
   REJECTED     any exclusion, or fit below threshold. Every rejection carries an explicit reason.
 """
 
+from .customer_type import decide_installer
 from .places import landing_page_mismatch
 
 FIT_THRESHOLD = 50
@@ -33,10 +34,14 @@ def _exclusions(p: dict) -> list[str]:
     out = []
     if not p.get("is_dutch"):
         out.append("website not in Dutch")
-    if "is_installer" in p and not p["is_installer"]:
+    if "trade_signal" in p:
         ev = p.get("installer_evidence", {})
-        out.append(f"not an installation business (trade terms {ev.get('trade', [])[:3]}, "
-                   f"unrelated {ev.get('unrelated', [])[:3]})")
+        ok, why = decide_installer(p["trade_signal"], ev.get("unrelated", []), p.get("domain") or "")
+        if not ok:
+            out.append(f"not an installation business ({why}; trade {ev.get('trade', [])[:3]}, "
+                       f"unrelated {ev.get('unrelated', [])[:3]})")
+    elif p.get("is_installer") is False:
+        out.append("not an installation business")
     if p.get("probable_chain") or (p.get("branches") or 0) > 1:
         out.append("chain / multiple branches")
     if p.get("team_signal") == "large":
@@ -46,6 +51,8 @@ def _exclusions(p: dict) -> list[str]:
     mismatch = landing_page_mismatch(p.get("domain") or "", p.get("city"))
     if mismatch:
         out.append(mismatch)
+    if (p.get("network_kvk_count") or 0) >= 2:
+        out.append(f"network: same KvK number on {p['network_kvk_count']} websites")
     if len(p.get("broker_markers") or []) >= 2:
         out.append("lead-broker / referral network (" + ", ".join(p["broker_markers"][:3]) + ")")
     if len(p.get("franchise_markers") or []) >= 2:
@@ -54,8 +61,9 @@ def _exclusions(p: dict) -> list[str]:
         out.append(f"network of regional landing pages ({p['town_link_count']} town links)")
     if len(p.get("webshop_markers") or []) >= 2:
         out.append("webshop / retailer (" + ", ".join(p["webshop_markers"][:3]) + ")")
-    if p.get("source") == "commoncrawl" and not p.get("nl_address_found"):
-        out.append("no Dutch business address (postcode) on website")
+    if p.get("source") == "commoncrawl" and not (p.get("nl_address_found") or p.get("kvk_number")
+                                                 or p.get("nl_phone_found")):
+        out.append("no Dutch business presence on website (no postcode, KvK number or Dutch phone number)")
     if p.get("customer_type") == "business":
         ev = ", ".join(p.get("customer_type_evidence", {}).get("business", [])[:4])
         out.append(f"serves mainly commercial/industrial clients ({ev})")

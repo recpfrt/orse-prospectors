@@ -187,6 +187,25 @@ def cmd_kvk_mark(args):
     print(f"[kvk] {args.domain}: marked {'kvk_verified_bv' if args.bv else 'not_bv'} -> queue {p['queue']}")
 
 
+def cmd_rescore(args):
+    """Re-apply the current scoring rules to stored results (no website fetches)."""
+    con = state.connect()
+    n = 0
+    order = {r["domain"]: r["first_seen"] for r in con.execute("select domain, first_seen from domains")}
+    for p in sorted(state.load_prospects(con), key=lambda x: (order.get(x["domain"], ""), x["domain"])):
+        p = {k: v for k, v in p.items() if k not in ("queue", "queue_reason", "status", "outreach_channel",
+                                                    "strong_prospect", "disqualify_reasons", "score_reasons",
+                                                    "duplicate_of")}
+        if p.get("fetch_status") == 200:
+            dup = state.find_duplicate(con, p)
+            if dup:
+                p["duplicate_of"] = dup
+        state.save_prospect(con, score.score(pipeline.apply_review(con, p)))
+        n += 1
+    con.commit()
+    print(f"[rescore] {n} prospects re-scored; network sweep flagged {pipeline.network_sweep(con)} domains")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -212,6 +231,7 @@ def main():
     dd.add_argument("--cc-tsv", default="data/raw/cc/nl-trade-domains.tsv")
     dd.add_argument("--seed", type=int, default=20261006)
     dd.set_defaults(func=cmd_daily)
+    sub.add_parser("rescore", help="re-apply current rules to stored results (no fetching)").set_defaults(func=cmd_rescore)
     im = sub.add_parser("import", help="seed local state with an earlier scored JSON file")
     im.add_argument("file")
     im.set_defaults(func=cmd_import)

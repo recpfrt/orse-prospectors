@@ -108,7 +108,7 @@ class TestNewExclusions(unittest.TestCase):
         self.assertEqual(score(base(webshop_markers=["winkelwagen", "afrekenen"]))["status"], "disqualified")
 
     def test_commoncrawl_requires_dutch_address(self):
-        r = score(base(source="commoncrawl", nl_address_found=False))
+        r = score(base(source="commoncrawl", nl_address_found=False, kvk_number=None))
         self.assertEqual(r["status"], "disqualified")
 
 
@@ -158,7 +158,7 @@ class TestQueues(unittest.TestCase):
 
     def test_safeguard_exclusions_have_reasons(self):
         cases = {
-            "not an installation business": dict(is_installer=False, installer_evidence={"trade": [], "unrelated": ["apk×2"]}),
+            "not an installation business": dict(trade_signal=0, installer_evidence={"trade": [], "unrelated": ["apk×2"]}),
             "franchise": dict(franchise_markers=["franchise", "franchisenemer"]),
             "regional landing pages": dict(town_link_count=14),
             "duplicate business": dict(duplicate_of="same email as x.nl"),
@@ -213,7 +213,66 @@ class TestKvkQueueRoundTrip(unittest.TestCase):
         from prospects import state
         with tempfile.TemporaryDirectory() as d:
             con = state.connect(pathlib.Path(d) / "t.sqlite")
+            state.record_attempt(con, "a.nl", "osm", 200)
+            con.execute("update domains set first_seen = '2026-01-01T00:00:00'")
             state.save_prospect(con, {"domain": "a.nl", "queue": "READY", "public_email": "info@a.nl",
                                       "business_name": "A", "city": "Utrecht"})
             self.assertIn("a.nl", state.find_duplicate(con, {"domain": "a-installatie.nl", "public_email": "INFO@a.nl"}))
+            con.close()
+
+
+class TestInstallerRule(unittest.TestCase):
+    def test_small_genuine_installer_passes(self):
+        from prospects.customer_type import decide_installer
+        self.assertTrue(decide_installer(5, [], "hagro-verwarming.nl")[0])
+        self.assertTrue(decide_installer(2, [], "mcelektraservice.nl")[0])
+        self.assertTrue(decide_installer(4, ["vacatures×7"], "kramerelektrotechniek.nl")[0])
+
+    def test_unrelated_business_fails(self):
+        from prospects.customer_type import decide_installer
+        self.assertFalse(decide_installer(0, ["apk×1", "motoren×2", "fietsen×3"], "ombouwsetelektrischefiets.nl")[0])
+        self.assertFalse(decide_installer(0, ["kapsalon×2"], "juliashaircorner.nl")[0])
+        self.assertFalse(decide_installer(2, [], "toa-geluid.nl")[0])
+
+
+class TestRound3(unittest.TestCase):
+    def test_parenthetical_place_names(self):
+        from prospects.places import landing_page_mismatch
+        self.assertIsNotNone(landing_page_mismatch("ontstoppen-bergen.nl", "Hoofddorp"))
+
+    def test_sound_installer_is_not_our_trade(self):
+        from prospects.customer_type import decide_installer
+        self.assertFalse(decide_installer(2, ["geluidsinstallaties×1"], "toa-geluidsinstallaties.nl")[0])
+
+    def test_generic_site_name_falls_back_to_domain(self):
+        from prospects.enrich import site_name
+        self.assertEqual(site_name("<title>Bedrijf</title>", "electrotechniekheesterbeek.nl"), "electrotechniekheesterbeek.nl")
+        self.assertEqual(site_name("<title>webinoost.nl</title>", "rioolservice010.nl"), "rioolservice010.nl")
+
+    def test_same_kvk_number_is_duplicate_of_earlier_domain(self):
+        import tempfile, pathlib
+        from prospects import state
+        with tempfile.TemporaryDirectory() as d:
+            con = state.connect(pathlib.Path(d) / "t.sqlite")
+            state.record_attempt(con, "first.nl", "commoncrawl", 200)
+            state.save_prospect(con, {"domain": "first.nl", "queue": "KVK_CHECK", "kvk_number": "83200000"})
+            con.execute("update domains set first_seen = '2026-01-01T00:00:00'")
+            state.record_attempt(con, "second.nl", "commoncrawl", 200)
+            self.assertIn("same KvK number", state.find_duplicate(con, {"domain": "second.nl", "kvk_number": "83200000"}))
+            self.assertIsNone(state.find_duplicate(con, {"domain": "first.nl", "kvk_number": "83200000"}))
+            con.close()
+
+
+class TestNetworkSweep(unittest.TestCase):
+    def test_all_domains_sharing_kvk_are_flagged(self):
+        import tempfile, pathlib
+        from prospects import state, pipeline
+        with tempfile.TemporaryDirectory() as d:
+            con = state.connect(pathlib.Path(d) / "t.sqlite")
+            for dom in ("first.nl", "second.nl"):
+                state.record_attempt(con, dom, "commoncrawl", 200)
+                state.save_prospect(con, score(base(customer_type="homeowner", domain=dom, kvk_number="83200000",
+                                                    public_email=f"info@{dom}")))
+            self.assertEqual(pipeline.network_sweep(con), 2)
+            self.assertEqual({p["queue"] for p in state.load_prospects(con)}, {"REJECTED"})
             con.close()

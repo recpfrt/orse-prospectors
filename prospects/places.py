@@ -30,7 +30,15 @@ def place_names() -> dict[str, str]:
     if not CBS_FILE.exists():
         return {}
     data = json.loads(CBS_FILE.read_text(encoding="utf-8"))["value"]
-    return {norm(p["Title"]): p["Title"] for p in data if p.get("Title")}
+    names: dict[str, str] = {}
+    for item in data:
+        title = item.get("Title")
+        if not title:
+            continue
+        names[norm(title)] = title
+        base = re.sub(r"\s*\(.*?\)\s*$", "", title)   # "Bergen (NH)" -> "Bergen"
+        names.setdefault(norm(base), base)
+    return names
 
 
 def best_place(tokens: list[str]) -> str | None:

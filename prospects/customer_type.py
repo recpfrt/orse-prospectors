@@ -72,7 +72,28 @@ TRADE_TERMS = ["installateur", "installatiebedrijf", "installatietechniek", "loo
 UNRELATED_TERMS = ["apk", "autobedrijf", "autogarage", "auto's", "occasions", "banden", "motorfiets", "motoren",
                    "scooter", "fietsen", "caravan", "camper", "jachtbouw", "makelaar", "kapsalon", "restaurant",
                    "webdesign", "opleidingen", "cursussen", "groothandel", "fabrikant", "distributeur",
-                   "importeur", "vacatures", "uitzendbureau", "detachering"]
+                   "importeur", "uitzendbureau", "detachering", "geluidsinstallatie", "geluidsinstallaties",
+                   "geluidstechniek", "audio", "licht en geluid", "omroepinstallatie"]
+# Installers often have job openings; never count these as unrelated (older stored evidence may contain them).
+IGNORED_UNRELATED = {"vacatures"}
+DOMAIN_TRADE_RE = re.compile(r"install|loodgiet|sanitair|elektr|electr|verwarm|klimaat|warmtepomp|airco|riool|ontstop|lekkage")
+
+
+def decide_installer(trade: int, unrelated_evidence: list[str], domain: str) -> tuple[bool, str]:
+    """Explicit installer rule, re-applicable to stored results without re-fetching."""
+    unrelated = 0
+    for item in unrelated_evidence:
+        term, _, count = item.rpartition("×")
+        if term not in IGNORED_UNRELATED:
+            unrelated += min(int(count or 1), 3)
+    domain_trade = bool(DOMAIN_TRADE_RE.search(domain or ""))
+    if trade >= 6 and trade >= 2 * unrelated:
+        return True, f"{trade} trade terms vs {unrelated} unrelated"
+    if trade >= 3 and unrelated == 0:
+        return True, f"{trade} trade terms, no unrelated terms"
+    if trade >= 2 and unrelated == 0 and domain_trade:
+        return True, f"{trade} trade terms + trade word in domain"
+    return False, f"only {trade} trade terms vs {unrelated} unrelated"
 
 
 def installer_check(lower_text: str) -> dict:
@@ -81,6 +102,5 @@ def installer_check(lower_text: str) -> dict:
     return {
         "trade_signal": trade,
         "unrelated_signal": unrelated,
-        "is_installer": trade >= 6 and trade >= 2 * unrelated,
-        "installer_evidence": {"trade": trade_ev[:8], "unrelated": unrelated_ev[:8]},
+        "installer_evidence": {"trade": trade_ev[:8], "unrelated": unrelated_ev},
     }
