@@ -9,7 +9,8 @@ def base(**kw):
     p = {"fetch_status": 200, "robots_blocked": False, "is_dutch": True, "probable_chain": False,
          "branches": None, "team_signal": "small", "booking_tools": [], "booking_phrases": [],
          "online_booking": False, "emergency_service": True, "legal_form": "bv",
-         "website_quality": 2, "public_email": "info@bedrijf.nl", "kvk_number": "12345678"}
+         "website_quality": 2, "public_email": "info@bedrijf.nl", "kvk_number": "12345678",
+         "legal_form_confidence": "strong"}
     p.update(kw)
     return p
 
@@ -48,7 +49,7 @@ class TestEnrich(unittest.TestCase):
 
 class TestScore(unittest.TestCase):
     def test_bv_with_email_is_email_candidate(self):
-        r = score(base())
+        r = score(base(customer_type="homeowner"))
         self.assertEqual((r["status"], r["outreach_channel"]), ("qualified", "email"))
         self.assertGreaterEqual(r["qualification_score"], 60)
 
@@ -128,3 +129,91 @@ class TestPlaces(unittest.TestCase):
         self.assertIsNone(landing_page_mismatch("vandongeninstallatie.nl", "Hank"))
         self.assertIsNone(landing_page_mismatch("installatiebedrijfvanbenschop.nl", "Kerkdriel"))
         self.assertIsNone(landing_page_mismatch("nijbroekinstallatiebedrijf.nl", "Dordrecht"))
+
+
+class TestQueues(unittest.TestCase):
+    H = dict(customer_type="homeowner", customer_type_evidence={"homeowner": ["cv-ketel×5"]})
+
+    def q(self, **kw):
+        return score(base(**{**self.H, **kw}))["queue"]
+
+    def test_ready_requires_strong_bv_homeowner_email(self):
+        self.assertEqual(self.q(), "READY")
+        self.assertEqual(self.q(customer_type="mixed"), "MANUAL_PHONE")
+        self.assertEqual(self.q(public_email=None), "MANUAL_PHONE")
+
+    def test_unknown_or_ambiguous_bv_goes_to_kvk_check(self):
+        self.assertEqual(self.q(legal_form="unknown"), "KVK_CHECK")
+        self.assertEqual(self.q(legal_form_confidence="weak"), "KVK_CHECK")
+        r = score(base(**self.H, legal_form="unknown", kvk_number=None))
+        self.assertIn("no legal form shown", r["queue_reason"])
+
+    def test_manual_kvk_verification_moves_queue(self):
+        self.assertEqual(self.q(legal_form="unknown", kvk_review="bv"), "READY")
+        self.assertEqual(self.q(legal_form="unknown", kvk_review="not_bv"), "MANUAL_PHONE")
+
+    def test_non_bv_never_ready(self):
+        for form in ("vof", "eenmanszaak"):
+            self.assertEqual(self.q(legal_form=form), "MANUAL_PHONE")
+
+    def test_safeguard_exclusions_have_reasons(self):
+        cases = {
+            "not an installation business": dict(is_installer=False, installer_evidence={"trade": [], "unrelated": ["apk×2"]}),
+            "franchise": dict(franchise_markers=["franchise", "franchisenemer"]),
+            "regional landing pages": dict(town_link_count=14),
+            "duplicate business": dict(duplicate_of="same email as x.nl"),
+            "HTTP 429": dict(fetch_status=429),
+        }
+        for reason, kw in cases.items():
+            r = score(base(**self.H, **kw))
+            self.assertEqual(r["queue"], "REJECTED", reason)
+            self.assertTrue(any(reason in x for x in r["disqualify_reasons"]), (reason, r["disqualify_reasons"]))
+
+
+class TestBvConfidenceDefault(unittest.TestCase):
+    def test_missing_confidence_is_not_strong(self):
+        r = score(base(customer_type="homeowner", legal_form_confidence=None))
+        self.assertEqual(r["queue"], "KVK_CHECK")
+
+
+class TestKvkQueueRoundTrip(unittest.TestCase):
+    def test_mark_bv_moves_to_ready_and_not_bv_to_manual(self):
+        import tempfile, pathlib, json
+        from prospects import state, pipeline
+        with tempfile.TemporaryDirectory() as d:
+            con = state.connect(pathlib.Path(d) / "t.sqlite")
+            row = base(customer_type="homeowner", legal_form="unknown", domain="voorbeeld.nl",
+                       business_name="Voorbeeld Installaties", city="Utrecht", is_installer=True)
+            pipeline.import_previous(con, [row])
+            self.assertEqual(state.load_prospects(con, "KVK_CHECK")[0]["domain"], "voorbeeld.nl")
+            for result, expected in (("bv", "READY"), ("not_bv", "MANUAL_PHONE")):
+                state.record_kvk_review(con, "voorbeeld.nl", result, "12345678", None)
+                p = json.loads(con.execute("select data from prospects").fetchone()["data"])
+                p = score({k: v for k, v in p.items() if k not in ("queue", "disqualify_reasons")})
+                p = score(pipeline.apply_review(con, p))
+                self.assertEqual(p["queue"], expected)
+            con.close()
+
+    def test_revisit_interval_and_429_skip(self):
+        import tempfile, pathlib, datetime as dt
+        from prospects import state
+        with tempfile.TemporaryDirectory() as d:
+            con = state.connect(pathlib.Path(d) / "t.sqlite")
+            state.record_attempt(con, "a.nl", "commoncrawl", 200)
+            self.assertFalse(state.is_due(con, "a.nl"))
+            self.assertTrue(state.is_due(con, "a.nl", dt.datetime.now() + dt.timedelta(days=31)))
+            state.record_attempt(con, "b.nl", "commoncrawl", 429)
+            self.assertTrue(state.is_due(con, "b.nl", dt.datetime.now() + dt.timedelta(days=8)))
+            state.record_attempt(con, "b.nl", "commoncrawl", 429)
+            self.assertFalse(state.is_due(con, "b.nl", dt.datetime.now() + dt.timedelta(days=365)))
+            con.close()
+
+    def test_cross_source_duplicate_by_email(self):
+        import tempfile, pathlib
+        from prospects import state
+        with tempfile.TemporaryDirectory() as d:
+            con = state.connect(pathlib.Path(d) / "t.sqlite")
+            state.save_prospect(con, {"domain": "a.nl", "queue": "READY", "public_email": "info@a.nl",
+                                      "business_name": "A", "city": "Utrecht"})
+            self.assertIn("a.nl", state.find_duplicate(con, {"domain": "a-installatie.nl", "public_email": "INFO@a.nl"}))
+            con.close()

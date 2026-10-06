@@ -15,7 +15,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from prospects import collect, drafts, enrich, score
+from prospects import collect, drafts, enrich, pipeline, report, score, state
 
 OUT = Path(__file__).parent / "data" / "out"
 RED_LIST = Path(__file__).parent / "data" / "do_not_contact.csv"   # local stand-in until Supabase is approved
@@ -141,6 +141,52 @@ def cmd_drafts(args):
     print(f"[drafts] wrote {out} and {md}", file=sys.stderr)
 
 
+def cmd_daily(args):
+    con = state.connect()
+    results, meta = pipeline.run_daily(con, args.cc_tsv, args.batch, args.seed)
+    out = OUT / "daily" / meta["date"]
+    path = report.write_daily(out, results, meta)
+    print(json.dumps(report.metrics(results), ensure_ascii=False, indent=2))
+    print(f"[daily] report: {path}", file=sys.stderr)
+
+
+def cmd_import(args):
+    con = state.connect()
+    rows = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    print(f"[import] {pipeline.import_previous(con, rows)} prospects imported into {state.DB_PATH}", file=sys.stderr)
+
+
+def cmd_kvk_list(args):
+    con = state.connect()
+    rows = sorted(state.load_prospects(con, "KVK_CHECK"), key=lambda p: -(p.get("fit_score") or 0))
+    OUT.mkdir(parents=True, exist_ok=True)
+    report.write_queue_csv(OUT / "kvk_check.csv", rows)
+    lines = ["# KVK CHECK queue — verify each company by hand on kvk.nl", "",
+             "For each: open the KvK link, confirm legal form (Rechtsvorm). Then run the mark command.", ""]
+    for p in rows:
+        lines.append(report.prospect_block(p) + f"- KvK lookup (open manually): {report.kvk_search_url(p)}\n"
+                     f"- B.V.: `python run.py kvk mark {p['domain']} --bv --kvk <nummer>`  ·  "
+                     f"not B.V.: `python run.py kvk mark {p['domain']} --not-bv`\n")
+    (OUT / "kvk_check.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[kvk] {len(rows)} companies to verify -> {OUT / 'kvk_check.md'} and kvk_check.csv")
+
+
+def cmd_kvk_mark(args):
+    con = state.connect()
+    row = con.execute("select data from prospects where domain = ?", (args.domain,)).fetchone()
+    if not row:
+        sys.exit(f"unknown domain: {args.domain}")
+    result = "bv" if args.bv else "not_bv"
+    state.record_kvk_review(con, args.domain, result, args.kvk, args.note)
+    p = json.loads(row["data"])
+    p = {k: v for k, v in p.items() if k not in ("queue", "queue_reason", "status", "outreach_channel",
+                                                "strong_prospect", "disqualify_reasons", "score_reasons")}
+    p = score.score(pipeline.apply_review(con, p))
+    state.save_prospect(con, p)
+    con.commit()
+    print(f"[kvk] {args.domain}: marked {'kvk_verified_bv' if args.bv else 'not_bv'} -> queue {p['queue']}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -161,6 +207,25 @@ def main():
     g.add_argument("--count", type=int, default=5)
     g.add_argument("--model", default="openai/gpt-oss-20b")
     g.set_defaults(func=cmd_drafts)
+    dd = sub.add_parser("daily", help="process the next batch of due Common Crawl domains")
+    dd.add_argument("--batch", type=int, default=120)
+    dd.add_argument("--cc-tsv", default="data/raw/cc/nl-trade-domains.tsv")
+    dd.add_argument("--seed", type=int, default=20261006)
+    dd.set_defaults(func=cmd_daily)
+    im = sub.add_parser("import", help="seed local state with an earlier scored JSON file")
+    im.add_argument("file")
+    im.set_defaults(func=cmd_import)
+    kv = sub.add_parser("kvk", help="KVK CHECK queue")
+    kvs = kv.add_subparsers(dest="kvk_cmd", required=True)
+    kvs.add_parser("list").set_defaults(func=cmd_kvk_list)
+    km = kvs.add_parser("mark")
+    km.add_argument("domain")
+    grp = km.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--bv", action="store_true", help="CEO verified on kvk.nl: legal form is B.V.")
+    grp.add_argument("--not-bv", action="store_true", help="CEO verified on kvk.nl: not a B.V.")
+    km.add_argument("--kvk", help="KvK number seen on kvk.nl")
+    km.add_argument("--note")
+    km.set_defaults(func=cmd_kvk_mark)
     args = ap.parse_args()
     args.func(args)
 

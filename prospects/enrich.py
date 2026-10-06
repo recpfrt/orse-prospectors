@@ -13,8 +13,8 @@ from urllib.parse import urljoin, urlparse
 
 from . import config
 from .collect import domain_of
-from .customer_type import classify
-from .places import best_place, place_names
+from .customer_type import classify, installer_check
+from .places import best_place, norm, place_names
 from .http import polite_get
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -155,6 +155,40 @@ def postcode_city(text: str) -> str | None:
     return None
 
 
+
+FRANCHISE_PHRASES = ["franchise", "franchisenemer", "franchiseformule", "onderdeel van de", "vestiging bij u in de buurt",
+                     "vestigingen in", "landelijk werkzaam", "landelijke dekking", "regiokantoor", "regiokantoren"]
+
+
+def town_link_count(page_html: str) -> int:
+    """Number of distinct links whose anchor text is exactly a Dutch place name.
+    Many such links = a network of regional landing pages ('loodgieter Amersfoort', 'loodgieter Baarn', ...)."""
+    places = place_names()
+    towns = set()
+    for _, label in LINK_RE.findall(page_html):
+        text = visible_text(label)
+        words = text.split()
+        if not words or len(words) > 4:
+            continue
+        candidate = norm(words[-1]) if len(words) > 1 else norm(text)
+        if candidate in places:
+            towns.add(candidate)
+    return len(towns)
+
+
+def bv_evidence_strength(evidence: str | None, business_name: str | None, domain: str) -> str | None:
+    """'strong' when the OSM name ends in B.V., or a name/domain token appears within the 4 words directly
+    before 'B.V.'. Otherwise 'weak' (e.g. 'KVK nummer M&I BV' on mirva.nl): needs human KvK check."""
+    if not evidence:
+        return None
+    if evidence.startswith("OSM name:"):
+        return "strong"
+    tokens = _name_tokens(business_name, domain)
+    before = re.split(r"\s*,?\s+(?:B\.\s?V\.|B\.V|BV)\s*$", evidence.strip())[0]
+    near = " ".join(before.lower().split()[-4:])
+    return "strong" if tokens and any(t in near for t in tokens) else "weak"
+
+
 def enrich(candidate: dict) -> dict:
     site = candidate["website"]
     domain = candidate["domain"]
@@ -207,12 +241,16 @@ def enrich(candidate: dict) -> dict:
         "nl_address_found": bool(POSTCODE_CITY_RE.search(all_text)),
         "webshop_markers": webshop_hits,
         "broker_markers": [m for m in BROKER_PHRASES if m in lower_text],
+        "franchise_markers": [m for m in FRANCHISE_PHRASES if m in lower_text],
+        "town_link_count": town_link_count(all_html),
         "final_url": final_url,
         "public_email": emails[0] if emails else None,
         "email_source_url": email_source,
         "kvk_number": kvk.group(1) if kvk else None,
         "legal_form": legal_form,
         "legal_form_evidence": legal_evidence,
+        "legal_form_confidence": (bv_evidence_strength(legal_evidence, business_name, final_domain)
+                                  if legal_form == "bv" else None),
         "booking_tools": tools,
         "booking_phrases": phrases,
         "online_booking": bool(tools or phrases),
@@ -224,5 +262,6 @@ def enrich(candidate: dict) -> dict:
         "is_dutch": 'lang="nl' in lower_html[:5000] or dutch_ratio >= 0.08,
         "homepage_excerpt": visible_text(home)[:3000],
         **classify(lower_text),
+        **installer_check(lower_text),
     })
     return result

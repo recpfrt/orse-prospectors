@@ -4,3 +4,4 @@ data/raw/
 data/out/
 *.pbf
 .env*
+data/state.sqlite*

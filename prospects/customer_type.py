@@ -60,3 +60,27 @@ def classify(lower_text: str) -> dict:
         "business_signal": biz,
         "customer_type_evidence": {"homeowner": home_ev[:10], "business": biz_ev[:10]},
     }
+
+
+# Positive evidence that the site belongs to an installation / repair trade business.
+TRADE_TERMS = ["installateur", "installatiebedrijf", "installatietechniek", "loodgieter", "loodgietersbedrijf",
+               "cv-ketel", "cv ketel", "elektricien", "elektrotechniek", "elektrotechnisch", "groepenkast",
+               "meterkast", "airco", "airconditioning", "warmtepomp", "ventilatie", "riolering", "ontstoppen",
+               "ontstopping", "sanitair", "verwarming", "vloerverwarming", "laadpaal", "lekkage", "boiler",
+               "storingsdienst", "installaties", "monteur", "monteurs"]
+# Evidence of an unrelated business that happens to match trade keywords (e.g. motor/automotive, retail, training).
+UNRELATED_TERMS = ["apk", "autobedrijf", "autogarage", "auto's", "occasions", "banden", "motorfiets", "motoren",
+                   "scooter", "fietsen", "caravan", "camper", "jachtbouw", "makelaar", "kapsalon", "restaurant",
+                   "webdesign", "opleidingen", "cursussen", "groothandel", "fabrikant", "distributeur",
+                   "importeur", "vacatures", "uitzendbureau", "detachering"]
+
+
+def installer_check(lower_text: str) -> dict:
+    trade, trade_ev = _weighted_hits(lower_text, {1: TRADE_TERMS})
+    unrelated, unrelated_ev = _weighted_hits(lower_text, {1: UNRELATED_TERMS})
+    return {
+        "trade_signal": trade,
+        "unrelated_signal": unrelated,
+        "is_installer": trade >= 6 and trade >= 2 * unrelated,
+        "installer_evidence": {"trade": trade_ev[:8], "unrelated": unrelated_ev[:8]},
+    }
