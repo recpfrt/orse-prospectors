@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 from . import config
 from .collect import domain_of
-from .customer_type import classify, dual_audience, installer_check
+from .customer_type import classify, dual_audience, installer_check, marine_evidence
 from .places import best_place, norm, place_names
 from .http import polite_get
 
@@ -429,6 +429,7 @@ def enrich(candidate: dict) -> dict:
         **classify(lower_text),
         **installer_check(lower_text),
         "dual_audience_evidence": dual_audience(lower_text),
+        "marine_evidence": marine_evidence(lower_text),
         "legal_form_source": "website_pages" if legal_form != "unknown" else None,
         "legal_form_source_url": evidence_page(pages, legal_evidence) if legal_form != "unknown" else None,
         "legal_pages_checked": [],

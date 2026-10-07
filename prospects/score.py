@@ -20,7 +20,7 @@ Legal-form provenance (legal_form_status), never upgraded beyond what actually h
   UNKNOWN       no reliable legal-form evidence (incl. weak/ambiguous mentions, uncertain KvK checks)
 """
 
-from .customer_type import decide_installer, dual_audience
+from .customer_type import decide_installer, dual_audience, marine_b2b, marine_evidence
 from .places import landing_page_mismatch
 
 FIT_THRESHOLD = 50
@@ -90,6 +90,10 @@ def _exclusions(p: dict) -> list[str]:
     if p.get("customer_type") == "business":
         ev = ", ".join(p.get("customer_type_evidence", {}).get("business", [])[:4])
         out.append(f"serves mainly commercial/industrial clients ({ev})")
+    marine = marine_market(p)
+    if marine and marine["weak_homeowner"]:
+        out.append(f"marine/shipping B2B market ({', '.join(marine['evidence'][:5])}) with weak homeowner fit "
+                   f"({marine['homeowner_why']})")
     return out
 
 
@@ -152,12 +156,33 @@ def clear_homeowner(p: dict) -> tuple[bool, str]:
     home, biz = p.get("homeowner_signal") or 0, p.get("business_signal") or 0
     if biz and biz * 2 > home:
         return False, f"commercial signals too strong (homeowner {home} vs business {biz})"
+    marine = marine_market(p)
+    if marine and p.get("kvk_homeowner_ok") != "yes":
+        return False, f"marine/shipping work alongside homeowner work ({', '.join(marine['evidence'][:3])}) — check by hand"
     dual = dual_audience_evidence(p)
     if dual:
         if home >= MIXED_MIN_HOMEOWNER_RATIO * biz and len(terms) >= MIXED_MIN_RESIDENTIAL:
             return True, f"{', '.join(terms[:4])}; also serves business customers ({', '.join(dual[:3])})"
         return False, f"mixed audience: serves business customers too ({', '.join(dual[:3])})"
     return True, ", ".join(terms[:4])
+
+
+def marine_market(p: dict) -> dict | None:
+    """Strong marine/shipping evidence, or None. 'weak_homeowner' when residential evidence is thin
+    (< MIXED_MIN_RESIDENTIAL core terms) or the marine signal outweighs the homeowner signal.
+    Older records without stored evidence fall back to the homepage excerpt."""
+    if "marine_evidence" in p:
+        evidence = p["marine_evidence"] or []
+    else:
+        evidence = marine_evidence((p.get("homepage_excerpt") or "").lower())
+    strong, marine = marine_b2b(evidence)
+    if not strong:
+        return None
+    terms, home = residential_terms(p), p.get("homeowner_signal") or 0
+    weak = len(terms) < MIXED_MIN_RESIDENTIAL or marine >= home
+    return {"evidence": evidence, "score": marine, "weak_homeowner": weak,
+            "homeowner_why": f"{len(terms)} residential terms ({', '.join(terms) or 'none'}), "
+                             f"homeowner signal {home} vs marine {marine}"}
 
 
 def dual_audience_evidence(p: dict) -> list[str]:

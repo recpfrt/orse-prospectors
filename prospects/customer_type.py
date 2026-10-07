@@ -106,6 +106,38 @@ def installer_check(lower_text: str) -> dict:
     }
 
 
+# Marine / shipping B2B market (e.g. electrical installers for inland shipping). Strong terms name the sector
+# itself; weak terms (ship, yacht, nautical, ...) only count alongside a strong term, never on their own.
+MARINE_TERMS = {
+    3: ["scheepvaart", "binnenvaart", "zeevaart", "koopvaardij", "maritiem", "maritieme", "scheepsbouw",
+        "jachtbouw", "scheepswerf", "scheepswerven", "scheepselektra", "scheepsinstallatie", "scheepsinstallaties",
+        "binnenvaartschepen", "droogladingschepen", "passagiersschepen", "tankvaart", "shipbuilding", "shipyard",
+        "marine electrical"],
+    1: ["schip", "schepen", "jacht", "jachten", "nautisch", "nautische", "marine", "offshore", "aan boord",
+        "stuurhuis", "stuurhuizen", "tankdek", "lloyd's register", "bureau veritas"],
+}
+MARINE_MIN_SIGNAL = 6     # weighted score (each term capped at 3 hits, like the customer-type terms)
+MARINE_MIN_TERMS = 2      # distinct terms: one isolated word is never enough
+
+
+def marine_evidence(lower_text: str) -> list[str]:
+    """Matched marine/shipping terms with counts (stored at enrichment, re-scored without re-fetching)."""
+    return _weighted_hits(lower_text, MARINE_TERMS)[1]
+
+
+def marine_b2b(evidence: list[str]) -> tuple[bool, int]:
+    """Strong marine/shipping evidence: score >= MARINE_MIN_SIGNAL, >= MARINE_MIN_TERMS distinct terms and at
+    least one sector term (weight 3). Returns (strong, weighted score)."""
+    weights = {t: w for w, terms in MARINE_TERMS.items() for t in terms}
+    score, strong_term = 0, False
+    for item in evidence:
+        term, _, count = item.rpartition("×")
+        w = weights.get(term, 0)
+        score += w * min(int(count or 1), 3)
+        strong_term |= w == 3
+    return strong_term and len(evidence) >= MARINE_MIN_TERMS and score >= MARINE_MIN_SIGNAL, score
+
+
 # Explicit statements that a business serves BOTH private and business customers.
 DUAL_AUDIENCE_PATTERNS = [
     r"particulier(?:en)?\s*(?:en|&|of|als|,)\s*(?:ook\s+)?(?:voor\s+)?(?:bedrijven|bedrijf|zakelijk\w*|ondernemers)",
