@@ -16,7 +16,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from prospects import collect, drafts, enrich, outreach, pipeline, report, score, state
+from prospects import collect, drafts, enrich, gm_cli, outreach, pipeline, report, score, state
 
 OUT = Path(__file__).parent / "data" / "out"
 RED_LIST = Path(__file__).parent / "data" / "do_not_contact.csv"   # local stand-in until Supabase is approved
@@ -573,6 +573,7 @@ def main():
     me = sub.add_parser("measure", help="aggregate measurement batches")
     me.add_argument("--only", help="only batches whose label starts with this")
     me.set_defaults(func=cmd_measure)
+    gm_cli.register(sub)
     args = ap.parse_args()
     try:
         args.func(args)
