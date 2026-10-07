@@ -74,9 +74,11 @@ def _prefix_matches(prefix: str, tokens: set[str]) -> bool:
     return any(t in low or t in compact or (len(tail) >= 4 and tail in t) for t in tokens)
 
 
-def detect_legal_form_with_evidence(text: str, business_name: str | None, domain: str) -> tuple[str, str | None]:
+def detect_legal_form_with_evidence(text: str, business_name: str | None, domain: str,
+                                    bare_eenmanszaak: bool = True) -> tuple[str, str | None]:
     """Conservative: 'bv' only when B.V. (any case: B.V., b.v., BV) is attached to this business's own name,
     or the business name itself ends with it. Ambiguous -> 'unknown'.
+    bare_eenmanszaak=False ignores a lone word 'eenmanszaak' (legal/terms templates use it generically).
     Returns (legal_form, evidence_snippet) so a human can check the classification."""
     if business_name and re.search(r"\b" + BV_SUFFIX + r"$", business_name.strip()):
         return "bv", f"business name: {business_name}"
@@ -88,7 +90,7 @@ def detect_legal_form_with_evidence(text: str, business_name: str | None, domain
     for m in re.finditer(r"([A-Za-z0-9&'\-. ]{2,60}?)\s*,?\s+" + VOF_SUFFIX + r"(?=[\s,.)]|$)", text):
         if _prefix_matches(m.group(1), tokens):
             found.setdefault("vof", m.group(0).strip()[-80:])
-    m = re.search(r".{0,40}\beenmanszaak\b.{0,20}", text, re.I)
+    m = re.search(r".{0,40}\beenmanszaak\b.{0,20}", text, re.I) if bare_eenmanszaak else None
     if m:
         found.setdefault("eenmanszaak", m.group(0).strip())
     if len(found) == 1:
@@ -220,6 +222,136 @@ def bv_evidence_strength(evidence: str | None, business_name: str | None, domain
     return "strong" if _prefix_matches(near, tokens) else "weak"
 
 
+# Legal / company-information pages, in priority order (pages most likely to name the legal entity first).
+LEGAL_PAGE_HINTS = (
+    ("colofon", "bedrijfsgegevens", "company-information", "company information", "impressum"),
+    ("algemene-voorwaarden", "algemene voorwaarden", "algemenevoorwaarden", "voorwaarden", "terms"),
+    ("privacyverklaring", "privacybeleid", "privacy-policy", "privacy statement", "privacy"),
+    ("disclaimer",),
+    ("cookiebeleid", "cookieverklaring", "cookie-policy", "cookies", "cookie"),
+)
+# Legal pages phrase it as "ingeschreven bij de KvK / Kamer van Koophandel onder nummer 12345678".
+# Exactly 8 digits (phone numbers have 10); used only on legal pages, the main-page KVK_RE is unchanged.
+LEGAL_KVK_RE = re.compile(r"(?:\bkvk|kamer van koophandel)\D{0,40}?(?<!\d)(\d{8})(?!\d)", re.I)
+NON_HTML_EXT = (".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".zip")
+
+
+def legal_page_links(base_url: str, page_html: str, site_domain: str, exclude=()) -> list[str]:
+    """Same-site links to legal/company-information pages, best first, at most MAX_LEGAL_PAGES."""
+    skip = {u.rstrip("/") for u in exclude} | {base_url.rstrip("/")}
+    ranked = []
+    for href, label in LINK_RE.findall(page_html):
+        url = urljoin(base_url, htmllib.unescape(href.strip()))
+        if not url.startswith("http") or domain_of(url) != site_domain or url.rstrip("/") in skip:
+            continue
+        path = urlparse(url).path.lower()
+        if path.endswith(NON_HTML_EXT):
+            continue
+        hay = (path + " " + visible_text(label)).lower()
+        for rank, group in enumerate(LEGAL_PAGE_HINTS):
+            if any(h in hay for h in group):
+                ranked.append((rank, url))
+                break
+    out = []
+    for _, url in sorted(ranked, key=lambda x: x[0]):
+        if url.rstrip("/") not in {u.rstrip("/") for u in out}:
+            out.append(url)
+    return out[: config.MAX_LEGAL_PAGES]
+
+
+def evidence_page(pages: list[tuple[str, str]], evidence: str | None) -> str | None:
+    """URL of the fetched page that contains the evidence snippet (provenance)."""
+    if not evidence or evidence.startswith(("business name:", "OSM name:", "conflicting")):
+        return None
+    needle = _compact(evidence)
+    for url, body in pages:
+        if needle and needle in _compact(visible_text(body)):
+            return url
+    return None
+
+
+def needs_legal_pages(p: dict) -> bool:
+    """Only when the normal pages gave no usable legal form: nothing found, or a weak B.V. mention.
+    Conflicting forms or a stated V.O.F./eenmanszaak are left alone."""
+    form, evidence = p.get("legal_form"), str(p.get("legal_form_evidence") or "")
+    if form == "unknown" or form is None:
+        return not evidence.startswith("conflicting")
+    return form == "bv" and p.get("legal_form_confidence") != "strong"
+
+
+def fetch_legal_evidence(base_url: str, home_html: str, site_domain: str, business_name: str | None,
+                         exclude=()) -> dict:
+    """Fetch up to MAX_LEGAL_PAGES legal pages (robots-aware, rate-limited) and detect the legal form there.
+    Legal-page text is used ONLY for legal form and KvK number, never for customer-type or trade signals."""
+    pages = []
+    for url in legal_page_links(base_url, home_html, site_domain, exclude):
+        status, final, body = polite_get(url)
+        if status == 200 and body:
+            pages.append((final, body))
+    text = visible_text("\n".join(b for _, b in pages))
+    form, evidence = detect_legal_form_with_evidence(text, business_name, site_domain, bare_eenmanszaak=False)
+    kvk = KVK_RE.search(text) or LEGAL_KVK_RE.search(text)
+    return {
+        "pages": [u for u, _ in pages],
+        "legal_form": form,
+        "legal_form_evidence": evidence,
+        "legal_form_confidence": bv_evidence_strength(evidence, business_name, site_domain) if form == "bv" else None,
+        "source_url": evidence_page(pages, evidence),
+        "kvk_number": kvk.group(1) if kvk else None,
+        "kvk_source_url": evidence_page(pages, kvk.group(0)) if kvk else None,
+    }
+
+
+def merge_legal_evidence(current: tuple, legal: tuple) -> tuple[str, str | None, str | None, bool]:
+    """Combine (form, evidence, confidence) from the normal pages with the legal pages.
+    Returns (form, evidence, confidence, legal_pages_used). Never upgrades on a conflict."""
+    c_form, c_ev, c_conf = current
+    l_form, l_ev, l_conf = legal
+    c_form = c_form or "unknown"
+    if l_form == "unknown":
+        return c_form, c_ev, c_conf, False
+    if c_form == "unknown":
+        if str(c_ev or "").startswith("conflicting"):
+            return c_form, c_ev, c_conf, False
+        return l_form, l_ev, l_conf, True
+    if c_form == l_form:
+        if c_form == "bv" and c_conf != "strong" and l_conf == "strong":
+            return l_form, l_ev, l_conf, True
+        return c_form, c_ev, c_conf, False
+    return "unknown", f"conflicting: {c_ev} | {l_ev}", None, False
+
+
+def apply_legal_pages(p: dict, legal: dict) -> dict:
+    """Merge legal-page evidence into a prospect record, keeping explicit provenance."""
+    form, evidence, confidence, used = merge_legal_evidence(
+        (p.get("legal_form"), p.get("legal_form_evidence"), p.get("legal_form_confidence")),
+        (legal["legal_form"], legal["legal_form_evidence"], legal["legal_form_confidence"]))
+    out = {**p, "legal_pages_checked": legal["pages"], "legal_form": form, "legal_form_evidence": evidence,
+           "legal_form_confidence": confidence}
+    if used:
+        out["legal_form_source"] = "legal_page"
+        out["legal_form_source_url"] = legal["source_url"]
+    elif form == "unknown":
+        out["legal_form_source"] = None
+        out["legal_form_source_url"] = None
+    if not p.get("kvk_number") and legal.get("kvk_number"):
+        out["kvk_number"] = legal["kvk_number"]
+        out["kvk_number_source_url"] = legal.get("kvk_source_url")
+    return out
+
+
+def legal_recheck(p: dict) -> dict:
+    """For a stored prospect: re-fetch the homepage only to find legal links, then those pages.
+    Returns {'status': http status, 'legal': evidence dict or None}."""
+    site = p.get("final_url") or p.get("website")
+    status, final_url, home = polite_get(site)
+    if status != 200 or not home:
+        return {"status": status, "legal": None}
+    site_domain = domain_of(final_url) or p["domain"]
+    return {"status": status,
+            "legal": fetch_legal_evidence(final_url, home, site_domain, p.get("business_name"))}
+
+
 def enrich(candidate: dict) -> dict:
     site = candidate["website"]
     domain = candidate["domain"]
@@ -297,5 +429,11 @@ def enrich(candidate: dict) -> dict:
         **classify(lower_text),
         **installer_check(lower_text),
         "dual_audience_evidence": dual_audience(lower_text),
+        "legal_form_source": "website_pages" if legal_form != "unknown" else None,
+        "legal_form_source_url": evidence_page(pages, legal_evidence) if legal_form != "unknown" else None,
+        "legal_pages_checked": [],
     })
+    if needs_legal_pages(result):
+        legal = fetch_legal_evidence(final_url, home, final_domain, business_name, exclude=[u for u, _ in pages])
+        result = apply_legal_pages(result, legal)
     return result

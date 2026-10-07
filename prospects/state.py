@@ -70,6 +70,30 @@ create table if not exists kvk_reviews (
   review_batch text,
   reviewed_at text not null
 );
+create table if not exists outreach (
+  domain text primary key,
+  company text not null check (length(trim(company)) > 0),
+  email text,
+  contacted_at text,
+  subject text,
+  message_version text,
+  status text not null check (status in ('NOT_CONTACTED', 'CONTACTED', 'REPLIED', 'INTERESTED',
+    'NOT_INTERESTED', 'FOLLOW_UP', 'PILOT', 'CUSTOMER', 'DO_NOT_CONTACT')),
+  follow_up_at text,
+  reply_type text,
+  next_action text,
+  notes text,
+  created_at text not null,
+  updated_at text not null
+);
+create table if not exists outreach_events (
+  id integer primary key autoincrement,
+  domain text not null,
+  at text not null,
+  from_status text,
+  to_status text not null,
+  note text
+);
 """
 
 

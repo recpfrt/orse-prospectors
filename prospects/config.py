@@ -9,6 +9,7 @@ USER_AGENT = (
 REQUEST_TIMEOUT_S = 10
 MAX_BYTES_PER_PAGE = 1_500_000
 MAX_PAGES_PER_SITE = 4          # homepage + up to 3 internal pages
+MAX_LEGAL_PAGES = 2             # extra legal/company-information pages, only when no clear legal form was found
 DELAY_BETWEEN_REQUESTS_S = 1.2  # sequential; never parallel against one host
 
 OVERPASS_ENDPOINTS = [

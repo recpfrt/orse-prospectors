@@ -10,6 +10,14 @@ Queues (CEO policy, 2026-10-06; email ONLY for confirmed B.V.):
                B.V. evidence ambiguous -> CEO verifies on kvk.nl by hand
   MANUAL_REVIEW relevant business, not eligible for cold email (not B.V., no role email, mixed clientele)
   REJECTED     any exclusion, or fit below threshold. Every rejection carries an explicit reason.
+  CONTACTED    already in outreach (CONTACTED or later status): never shown as a new prospect.
+  DO_NOT_CONTACT  outreach status DO_NOT_CONTACT.
+
+Legal-form provenance (legal_form_status), never upgraded beyond what actually happened:
+  KVK_VERIFIED  B.V. checked by hand on the official KvK register (CEO review)
+  WEBSITE_BV    B.V. stated on the company's own website, tied to its own name; NOT checked on KvK
+  NOT_BV        V.O.F. / eenmanszaak on the website, or KvK check says not a B.V.
+  UNKNOWN       no reliable legal-form evidence (incl. weak/ambiguous mentions, uncertain KvK checks)
 """
 
 from .customer_type import decide_installer, dual_audience
@@ -202,6 +210,21 @@ def bv_status(p: dict) -> str:
     return "unknown"
 
 
+KVK_VERIFIED, WEBSITE_BV, NOT_BV, UNKNOWN = "KVK_VERIFIED", "WEBSITE_BV", "NOT_BV", "UNKNOWN"
+CONTACTED, DO_NOT_CONTACT = "CONTACTED", "DO_NOT_CONTACT"
+
+
+def legal_form_status(p: dict) -> str:
+    bv = bv_status(p)
+    if p.get("kvk_review") == "bv":
+        return KVK_VERIFIED if bv == "confirmed" else UNKNOWN   # entity mismatch / inactive: not verified
+    if bv == "not_bv":
+        return NOT_BV
+    if bv == "confirmed":
+        return WEBSITE_BV                                       # strong website evidence, no KvK check
+    return UNKNOWN
+
+
 def missing_bv_evidence(p: dict) -> str:
     if p.get("legal_form") == "bv":
         return f"B.V. mentioned but not clearly tied to this business: \"{p.get('legal_form_evidence')}\""
@@ -230,7 +253,8 @@ def score(p: dict) -> dict:
         queue, why = KVK_CHECK, (f"domain guard: {guard} -> verify the legal entity on KvK before outreach "
                                  f"(clear homeowner fit, public role email, fit {fit})")
     elif bv == "confirmed" and homeowner and email:
-        via = "manual KvK verification" if p.get("kvk_review") == "bv" else "website evidence"
+        via = ("manual KvK verification" if p.get("kvk_review") == "bv"
+               else "website evidence — WEBSITE_BV, not verified on KvK")
         queue, why = READY, f"B.V. confirmed ({via}), clear homeowner fit ({homeowner_why}), public role email, fit {fit}"
     elif homeowner and email and bv in ("unknown", "ambiguous"):
         queue, why = KVK_CHECK, f"clear homeowner fit ({homeowner_why}) + public role email; " + missing_bv_evidence(p)
@@ -258,19 +282,27 @@ def score(p: dict) -> dict:
     elif hold:
         why = f"{why} | manual hold (CEO): {hold}"
 
+    # Outreach tracking: a company already contacted (or marked do-not-contact) is never a new prospect.
+    contact = p.get("outreach_status")
+    if contact and contact != "NOT_CONTACTED":
+        why = f"already in outreach ({contact}; {p.get('outreach_match')}) — not a new prospect | would otherwise be {queue}: {why}"
+        queue = DO_NOT_CONTACT if contact == "DO_NOT_CONTACT" else CONTACTED
+
     qualification = 0 if excluded else min(fit + (BV_BONUS if bv == "confirmed" else 0), 100)
     return {
         **p,
         "queue": queue,
         "queue_reason": why,
         "bv_status": bv,
+        "legal_form_status": legal_form_status(p),
         "fit_score": fit,
         "qualification_score": qualification,
         "score_reasons": reasons + ([f"+{BV_BONUS} B.V. confirmed"] if bv == "confirmed" and not excluded else []),
         "disqualify_reasons": excluded,
         "domain_guard": guard,
         # compatibility with drafts.py and earlier reports
-        "status": {READY: "qualified", KVK_CHECK: "kvk_check", MANUAL_REVIEW: "manual_review"}.get(queue, "disqualified"),
+        "status": {READY: "qualified", KVK_CHECK: "kvk_check", MANUAL_REVIEW: "manual_review",
+                   CONTACTED: "contacted", DO_NOT_CONTACT: "do_not_contact"}.get(queue, "disqualified"),
         "outreach_channel": "email" if queue == READY else ("none" if queue == REJECTED else "phone_or_contact_form"),
         "strong_prospect": queue == READY,
     }

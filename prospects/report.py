@@ -5,7 +5,8 @@ import urllib.parse
 from collections import Counter
 from pathlib import Path
 
-from .score import KVK_CHECK, MANUAL_REVIEW, READY, REJECTED
+from .score import (KVK_CHECK, KVK_VERIFIED, MANUAL_REVIEW, READY, REJECTED, UNKNOWN, WEBSITE_BV,
+                    legal_form_status)
 
 
 def _ev(p: dict, key: str) -> str:
@@ -13,11 +14,15 @@ def _ev(p: dict, key: str) -> str:
 
 
 def bv_evidence_text(p: dict) -> str:
-    if p.get("kvk_review") == "bv":
-        return f"KvK verified by CEO ({p.get('kvk_review_number') or 'no number noted'})"
+    status = legal_form_status(p)
+    if status == KVK_VERIFIED:
+        return f"KVK_VERIFIED — checked by hand on kvk.nl ({p.get('kvk_review_number') or 'no number noted'})"
     if p.get("legal_form") == "bv":
-        return f"[{p.get('legal_form_confidence')}] \"{p.get('legal_form_evidence')}\""
-    return "none on website"
+        label = "WEBSITE_BV" if status == WEBSITE_BV else "UNKNOWN (weak website mention)"
+        src = p.get("legal_form_source_url")
+        return (f"{label} — \"{p.get('legal_form_evidence')}\"" + (f" (source: {src})" if src else "")
+                + " — not verified on KvK")
+    return f"{status} — no reliable legal-form evidence on website" if status == UNKNOWN else status
 
 
 def kvk_search_url(p: dict) -> str:
@@ -64,7 +69,7 @@ def is_network(p: dict) -> bool:
 
 def write_queue_csv(path: Path, rows: list[dict]) -> None:
     fields = ["business_name", "city", "website", "public_email", "service_category", "fit_score",
-              "qualification_score", "customer_type", "homeowner_evidence", "bv_status", "bv_evidence",
+              "qualification_score", "customer_type", "homeowner_evidence", "bv_status", "legal_form_status", "bv_evidence",
               "kvk_number_on_site", "queue_reason", "kvk_search_url", "source", "domain"]
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -75,7 +80,7 @@ def write_queue_csv(path: Path, rows: list[dict]) -> None:
                 "public_email": p.get("public_email"), "service_category": p.get("service_category"),
                 "fit_score": p.get("fit_score"), "qualification_score": p.get("qualification_score"),
                 "customer_type": p.get("customer_type"), "homeowner_evidence": _ev(p, "homeowner"),
-                "bv_status": p.get("bv_status"), "bv_evidence": bv_evidence_text(p),
+                "bv_status": p.get("bv_status"), "legal_form_status": legal_form_status(p), "bv_evidence": bv_evidence_text(p),
                 "kvk_number_on_site": p.get("kvk_number"), "queue_reason": p.get("queue_reason"),
                 "kvk_search_url": kvk_search_url(p), "source": p.get("source"), "domain": p["domain"],
             })

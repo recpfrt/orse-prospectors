@@ -9,19 +9,21 @@ Writes only to ./data/out. No database writes, no Gmail, no email, no contact wi
 import argparse
 import csv
 import datetime
+import datetime as dt
 import json
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
-from prospects import collect, drafts, enrich, pipeline, report, score, state
+from prospects import collect, drafts, enrich, outreach, pipeline, report, score, state
 
 OUT = Path(__file__).parent / "data" / "out"
 RED_LIST = Path(__file__).parent / "data" / "do_not_contact.csv"   # local stand-in until Supabase is approved
 
 CSV_FIELDS = ["status", "outreach_channel", "strong_prospect", "qualification_score", "customer_type", "business_name", "city", "service_category",
-              "website", "public_email", "email_source_url", "legal_form", "legal_form_evidence", "kvk_number", "online_booking",
+              "website", "public_email", "email_source_url", "legal_form", "legal_form_status", "legal_form_evidence",
+              "legal_form_source_url", "kvk_number", "online_booking",
               "emergency_service", "team_signal", "website_quality", "score_reasons", "disqualify_reasons"]
 
 
@@ -390,6 +392,87 @@ def cmd_rescore(args):
     print(f"[rescore] {n} prospects re-scored; network sweep flagged {pipeline.network_sweep(con)} domains")
 
 
+def _rescore_all(con) -> int:
+    """Re-apply scoring + review/outreach overlays to every stored prospect (no fetching, no dup re-detection)."""
+    n = 0
+    for (domain,) in con.execute("select domain from prospects").fetchall():
+        _rescore_domain(con, domain)
+        n += 1
+    con.commit()
+    return n
+
+
+def cmd_outreach_add(args):
+    con = _con(args)
+    row = outreach.record_contact(con, args.domain, args.company, args.email, args.date, subject=args.subject,
+                                  message_version=args.version, follow_up_at=args.follow_up,
+                                  next_action=args.next_action, notes=args.notes)
+    con.commit()
+    _rescore_all(con)
+    print(f"[outreach] {row['domain']}: {row['status']} on {row['contacted_at']} (follow-up {row['follow_up_at']})")
+
+
+def cmd_outreach_status(args):
+    con = _con(args)
+    row = outreach.set_status(con, args.domain, args.status, reply_type=args.reply_type,
+                              next_action=args.next_action, follow_up_at=args.follow_up, note=args.note)
+    con.commit()
+    _rescore_all(con)
+    print(f"[outreach] {row['domain']}: now {row['status']}")
+
+
+def cmd_outreach_list(args):
+    con = _con(args)
+    rows = outreach.tracked(con, include_not_contacted=True)
+    today = dt.date.today().isoformat()
+    for r in rows:
+        due = " (FOLLOW-UP DUE)" if r["follow_up_at"] and r["follow_up_at"] <= today and r["status"] in (
+            outreach.CONTACTED, outreach.FOLLOW_UP) else ""
+        print(f"{r['status']:<14} {r['domain']:<34} {r['email'] or '-':<36} contacted {r['contacted_at'] or '-'}"
+              f"  follow-up {r['follow_up_at'] or '-'}{due}\n{'':15}subject: {r['subject'] or '-'} | version: "
+              f"{r['message_version'] or '-'} | reply: {r['reply_type'] or '-'} | next: {r['next_action'] or '-'}")
+    print(f"[outreach] {len(rows)} tracked")
+
+
+def cmd_prospects(args):
+    """New-prospect recommendations (READY, never contacted, deduplicated, KVK_VERIFIED first)."""
+    con = _con(args)
+    rows = pipeline.prospect_list(con)
+    OUT.mkdir(parents=True, exist_ok=True)
+    report.write_queue_csv(OUT / "prospect_list.csv", rows)
+    lines = ["# New prospects — READY, not contacted, one row per business", "",
+             "KVK_VERIFIED = checked by hand on kvk.nl · WEBSITE_BV = B.V. stated on the company's own website, "
+             "NOT verified on KvK.", ""]
+    lines += [report.prospect_block(p) for p in rows]
+    (OUT / "prospect_list.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    counts = {}
+    for p in rows:
+        counts[p["legal_form_status"]] = counts.get(p["legal_form_status"], 0) + 1
+    print(json.dumps({"new_prospects": len(rows), "by_legal_form_status": counts}, indent=2))
+    for p in rows:
+        print(f"  {p['legal_form_status']:<13} {p['domain']:<34} {p.get('public_email')}")
+
+
+def cmd_legal_recheck(args):
+    """Fetch legal/company-information pages for stored candidates (robots-aware, rate-limited, no contact)."""
+    con = _con(args)
+    cands = pipeline.legal_recheck_candidates(con, force=args.force)
+    if args.limit:
+        cands = cands[: args.limit]
+    stamp = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+    results = []
+    for i, p in enumerate(cands, 1):
+        r = pipeline.legal_recheck(con, p, apply=not args.dry_run)
+        results.append(r)
+        print(f"[legal] {i}/{len(cands)} {p['domain']}: http {r['http_status']} {r['before_queue']}->{r['after_queue']} "
+              f"{r['before_legal_status']}->{r['after_legal_status']}", file=sys.stderr)
+    swept = pipeline.network_sweep(con) if not args.dry_run else 0
+    OUT.mkdir(parents=True, exist_ok=True)
+    path = OUT / f"legal_recheck-{stamp}{'-dryrun' if args.dry_run else ''}.json"
+    path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[legal] {len(results)} rechecked; network sweep {swept}; details -> {path}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", help="state database path (default: $ORSE_PROSPECTS_DB or data/state.sqlite)")
@@ -458,6 +541,35 @@ def main():
     hl = hos.add_parser("list")
     hl.add_argument("--all", action="store_true", help="include released holds")
     hl.set_defaults(func=cmd_hold_list)
+    ou = sub.add_parser("outreach", help="local outreach tracking (the CEO sends every email by hand)")
+    ous = ou.add_subparsers(dest="outreach_cmd", required=True)
+    oa = ous.add_parser("add", help="record a first contact the CEO already sent")
+    oa.add_argument("domain")
+    oa.add_argument("--company", required=True)
+    oa.add_argument("--email", help="address the CEO used; omit when unknown (never guessed)")
+    oa.add_argument("--date", required=True, help="contact date YYYY-MM-DD")
+    oa.add_argument("--subject", default="UNKNOWN")
+    oa.add_argument("--version", default="UNKNOWN", help="message/version identifier")
+    oa.add_argument("--follow-up", help="follow-up date YYYY-MM-DD")
+    oa.add_argument("--next-action")
+    oa.add_argument("--notes")
+    oa.set_defaults(func=cmd_outreach_add)
+    os_ = ous.add_parser("status", help="change status (validated transitions)")
+    os_.add_argument("domain")
+    os_.add_argument("status", choices=list(outreach.STATUSES))
+    os_.add_argument("--reply-type", choices=list(outreach.REPLY_TYPES))
+    os_.add_argument("--next-action")
+    os_.add_argument("--follow-up")
+    os_.add_argument("--note")
+    os_.set_defaults(func=cmd_outreach_status)
+    ous.add_parser("list").set_defaults(func=cmd_outreach_list)
+    sub.add_parser("prospects", help="new-prospect list: READY, not contacted, deduplicated").set_defaults(
+        func=cmd_prospects)
+    lr = sub.add_parser("legal-recheck", help="fetch legal pages for stored KVK_CHECK / MANUAL_REVIEW candidates")
+    lr.add_argument("--limit", type=int)
+    lr.add_argument("--dry-run", action="store_true", help="fetch and report, but do not save")
+    lr.add_argument("--force", action="store_true", help="also recheck prospects rechecked before")
+    lr.set_defaults(func=cmd_legal_recheck)
     me = sub.add_parser("measure", help="aggregate measurement batches")
     me.add_argument("--only", help="only batches whose label starts with this")
     me.set_defaults(func=cmd_measure)
