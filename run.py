@@ -421,6 +421,21 @@ def cmd_outreach_status(args):
     print(f"[outreach] {row['domain']}: now {row['status']}")
 
 
+def cmd_outreach_update(args):
+    con = _con(args)
+    before = outreach.get(con, args.domain)
+    try:
+        row = outreach.update_details(con, args.domain, note=args.note, follow_up_at=args.follow_up,
+                                      email=args.email, next_action=args.next_action)
+    except ValueError as e:        # OutreachError, or an impossible calendar date such as 2026-02-30
+        sys.exit(f"[outreach] {e}")
+    con.commit()
+    if before is not None and row["email"] != before["email"]:
+        _rescore_all(con)          # the email takes part in contact matching; follow-up date / next action do not
+    print(f"[outreach] {row['domain']}: {row['status']} (unchanged) · follow-up {row['follow_up_at'] or '-'} · "
+          f"email {row['email'] or 'UNKNOWN'} · next: {row['next_action'] or '-'}")
+
+
 def cmd_outreach_list(args):
     con = _con(args)
     rows = outreach.tracked(con, include_not_contacted=True)
@@ -562,6 +577,13 @@ def main():
     os_.add_argument("--follow-up")
     os_.add_argument("--note")
     os_.set_defaults(func=cmd_outreach_status)
+    ou_ = ous.add_parser("update", help="set follow-up date / email / next action without changing the status")
+    ou_.add_argument("domain")
+    ou_.add_argument("--follow-up", help="next follow-up date YYYY-MM-DD")
+    ou_.add_argument("--email", help="recipient address the CEO actually used")
+    ou_.add_argument("--next-action")
+    ou_.add_argument("--note", required=True, help="why the details change (kept in the outreach event log)")
+    ou_.set_defaults(func=cmd_outreach_update)
     ous.add_parser("list").set_defaults(func=cmd_outreach_list)
     sub.add_parser("prospects", help="new-prospect list: READY, not contacted, deduplicated").set_defaults(
         func=cmd_prospects)

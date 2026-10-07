@@ -182,6 +182,43 @@ def set_status(con: sqlite3.Connection, domain: str, new_status: str, *, reply_t
     return dict(get(con, domain))
 
 
+# Records whose details may no longer change: not yet contacted, or closed.
+DETAILS_LOCKED = (NOT_CONTACTED, DO_NOT_CONTACT, CUSTOMER, NOT_INTERESTED)
+
+
+def update_details(con: sqlite3.Connection, domain: str, *, note: str, follow_up_at: str | None = None,
+                   email: str | None = None, next_action: str | None = None) -> dict:
+    """Change follow-up date, recipient email or next action of a contacted company WITHOUT changing its status.
+    Every change is written to outreach_events (status unchanged, old -> new values in the note)."""
+    ensure_schema(con)
+    domain = _norm_domain(domain)
+    if not note or not note.strip():
+        raise OutreachError("a note explaining the change is required")
+    if follow_up_at is None and email is None and next_action is None:
+        raise OutreachError("nothing to update: give a follow-up date, email or next action")
+    row = get(con, domain)
+    if row is None:
+        raise OutreachError(f"{domain} is not tracked; record the first contact first")
+    if row["status"] in DETAILS_LOCKED:
+        raise OutreachError(f"{domain} is {row['status']}; its details cannot be updated")
+    _check_date(follow_up_at, "follow_up_at")
+    if email is not None:
+        if not EMAIL_RE.match(email.strip()):
+            raise OutreachError(f"not a single plain email address: {email!r}")
+        email = email.strip().lower()
+    new = {"follow_up_at": follow_up_at, "email": email, "next_action": next_action}
+    changes = {k: (row[k], v) for k, v in new.items() if v is not None and v != row[k]}
+    if not changes:
+        return dict(row)                                   # idempotent: nothing changed, nothing logged
+    ts = state.now()
+    con.execute(f"update outreach set {', '.join(f'{k} = ?' for k in changes)}, updated_at = ? where domain = ?",
+                (*[v for _, v in changes.values()], ts, domain))
+    summary = "; ".join(f"{k}: {old if old is not None else '-'} -> {v}" for k, (old, v) in changes.items())
+    con.execute("insert into outreach_events (domain, at, from_status, to_status, note) values (?, ?, ?, ?, ?)",
+                (domain, ts, row["status"], row["status"], f"details updated ({summary}) | {note.strip()}"))
+    return dict(get(con, domain))
+
+
 def tracked(con: sqlite3.Connection, include_not_contacted: bool = False) -> list[sqlite3.Row]:
     ensure_schema(con)
     sql = "select * from outreach"

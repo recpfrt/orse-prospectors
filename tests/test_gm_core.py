@@ -467,6 +467,99 @@ class TestHealthProbes(GmCase):
         self.assertTrue(any(i["fingerprint"].startswith("health:http:") for i in gm_state.open_incidents(self.con)))
 
 
+class TestFollowUpTracking(GmCase):
+    """Follow-up policy as approved by the CEO: dates set via outreach.update_details, CEO-approved manual sends,
+    replies / opt-outs cancel pending follow-ups, unknown recipients are escalated."""
+
+    def contacted(self, domain, email):
+        outreach.record_contact(self.con, domain, domain.split(".")[0].title(), email, "2026-10-06")
+        self.con.commit()
+
+    def next_day_run(self, day=13):
+        return self.run_gm(run_date=dt.date(2026, 10, day), now=clock(dt.datetime(2026, 10, day, 7, tzinfo=TZ)))
+
+    def test_setting_dates_resolves_missing_date_incident(self):
+        self.contacted("a.nl", "info@a.nl")
+        self.run_gm()
+        self.assertIn("follow-up:missing-date", {i["fingerprint"] for i in gm_state.open_incidents(self.con)})
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.run_gm(rerun=True)
+        self.assertNotIn("follow-up:missing-date", {i["fingerprint"] for i in gm_state.open_incidents(self.con)})
+        self.assertEqual(self.approvals("PENDING"), [])           # not due yet on 2026-10-08
+
+    def test_due_follow_up_with_unknown_recipient_is_escalated(self):
+        self.contacted("vt.nl", None)
+        outreach.update_details(self.con, "vt.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.next_day_run()
+        inc = {i["fingerprint"]: i for i in gm_state.open_incidents(self.con)}
+        nr = inc["follow-up:no-recipient:vt.nl"]
+        self.assertEqual((nr["severity"], nr["needs_ceo"]), ("P2", 1))
+        fu = [a for a in self.approvals("PENDING") if a["category"] == "SEND_FOLLOW_UP"]
+        self.assertEqual(len(fu), 1)
+        self.assertEqual(json.loads(fu[0]["details"])["email"], "UNKNOWN")
+        self.assertIn("RECIPIENT UNKNOWN", fu[0]["recommendation"])
+
+    def test_confirmed_recipient_resolves_the_escalation(self):
+        self.contacted("vt.nl", None)
+        outreach.update_details(self.con, "vt.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.next_day_run()
+        outreach.update_details(self.con, "vt.nl", email="info@vt.nl", note="confirmed from Sent folder")
+        self.con.commit()
+        self.next_day_run(day=14)
+        self.assertNotIn("follow-up:no-recipient:vt.nl", {i["fingerprint"] for i in gm_state.open_incidents(self.con)})
+        fu = [a for a in self.approvals("PENDING") if a["category"] == "SEND_FOLLOW_UP"]
+        self.assertEqual(json.loads(fu[0]["details"])["email"], "info@vt.nl")
+
+    def test_known_recipient_gets_no_escalation(self):
+        self.contacted("a.nl", "info@a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.next_day_run()
+        self.assertFalse([i for i in gm_state.open_incidents(self.con)
+                          if i["fingerprint"].startswith("follow-up:no-recipient:")])
+
+    def test_reply_cancels_pending_follow_up(self):
+        self.contacted("a.nl", "info@a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.next_day_run()
+        outreach.set_status(self.con, "a.nl", "REPLIED", reply_type="question", note="replied by email")
+        self.con.commit()
+        self.next_day_run(day=14)
+        st = {a["fingerprint"]: a["status"] for a in self.approvals()}
+        self.assertEqual(st["follow-up:a.nl:2026-10-13"], "WITHDRAWN")
+
+    def test_opt_out_cancels_pending_follow_up_and_locks_record(self):
+        self.contacted("a.nl", "info@a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.next_day_run()
+        outreach.set_status(self.con, "a.nl", "DO_NOT_CONTACT", reply_type="unsubscribe", note="replied 'stop'")
+        self.con.commit()
+        self.next_day_run(day=14)
+        self.assertEqual({a["fingerprint"]: a["status"] for a in self.approvals()}["follow-up:a.nl:2026-10-13"],
+                         "WITHDRAWN")
+        with self.assertRaises(outreach.OutreachError):
+            outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-22", note="no")
+
+    def test_second_follow_up_after_rescheduling(self):
+        self.contacted("a.nl", "info@a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.next_day_run()
+        outreach.set_status(self.con, "a.nl", "FOLLOW_UP", follow_up_at="2026-10-22", note="follow-up 1 sent")
+        self.con.commit()
+        self.next_day_run(day=14)
+        st = {a["fingerprint"]: a["status"] for a in self.approvals()}
+        self.assertEqual(st["follow-up:a.nl:2026-10-13"], "WITHDRAWN")     # done; no longer due
+        self.next_day_run(day=22)
+        st = {a["fingerprint"]: a["status"] for a in self.approvals()}
+        self.assertEqual(st["follow-up:a.nl:2026-10-22"], "PENDING")
+
+
 class TestContactInvariant(GmCase):
     def test_held_ready_prospect_raises_p1(self):
         self.save(ready("held.nl"))

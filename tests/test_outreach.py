@@ -200,5 +200,118 @@ class TestProspectList(OutreachCase):
                          [("kvk.nl", "KVK_VERIFIED"), ("web.nl", "WEBSITE_BV")])
 
 
+class TestUpdateDetails(OutreachCase):
+    """Follow-up date / recipient / next action change without a status change, always with an audit event."""
+
+    def unknown_recipient(self):
+        return outreach.record_contact(self.con, "ventilatietotaal.nl", "VentilatieTotaal", None, "2026-10-06",
+                                       subject="Onderwerp", message_version="V1")
+
+    def events(self, domain):
+        return self.con.execute("select from_status, to_status, note from outreach_events where domain = ? "
+                                "order by id", (domain,)).fetchall()
+
+    def test_sets_follow_up_without_changing_status(self):
+        self.contact("a.nl")
+        r = outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy: 5 working days")
+        self.assertEqual((r["status"], r["follow_up_at"], r["email"]), ("CONTACTED", "2026-10-13", "info@a.nl"))
+        last = self.events("a.nl")[-1]
+        self.assertEqual((last["from_status"], last["to_status"]), ("CONTACTED", "CONTACTED"))
+        self.assertIn("follow_up_at: - -> 2026-10-13", last["note"])
+        self.assertIn("policy: 5 working days", last["note"])
+
+    def test_unknown_recipient_stays_unknown_when_only_the_date_changes(self):
+        self.unknown_recipient()
+        r = outreach.update_details(self.con, "ventilatietotaal.nl", follow_up_at="2026-10-13", note="policy")
+        self.assertIsNone(r["email"])
+        self.assertNotIn("email", self.events("ventilatietotaal.nl")[-1]["note"])
+
+    def test_email_change_is_logged_with_old_and_new_value(self):
+        self.unknown_recipient()
+        r = outreach.update_details(self.con, "ventilatietotaal.nl", email=" Info@VentilatieTotaal.NL ",
+                                    note="confirmed from Sent folder")
+        self.assertEqual(r["email"], "info@ventilatietotaal.nl")
+        self.assertIn("email: - -> info@ventilatietotaal.nl", self.events("ventilatietotaal.nl")[-1]["note"])
+
+    def test_reschedule_keeps_history(self):
+        self.contact("a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="first")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-22", note="second")
+        notes = [e["note"] for e in self.events("a.nl")]
+        self.assertIn("follow_up_at: 2026-10-13 -> 2026-10-22", notes[-1])
+        self.assertEqual(len(notes), 3)                       # contact + 2 updates
+
+    def test_same_values_are_a_noop(self):
+        self.contact("a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="x")
+        before = len(self.events("a.nl"))
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", email="info@a.nl", note="again")
+        self.assertEqual(len(self.events("a.nl")), before)
+
+    def test_validation(self):
+        self.contact("a.nl")
+        bad = [dict(follow_up_at="13-10-2026", note="n"), dict(follow_up_at="2026-02-30", note="n"),
+               dict(email="a@b.nl, c@d.nl", note="n"), dict(email="not-an-email", note="n"),
+               dict(follow_up_at="2026-10-13", note=" "), dict(note="nothing to change")]
+        for kw in bad:
+            with self.assertRaises((outreach.OutreachError, ValueError), msg=str(kw)):
+                outreach.update_details(self.con, "a.nl", **kw)
+        with self.assertRaises(outreach.OutreachError):
+            outreach.update_details(self.con, "untracked.nl", follow_up_at="2026-10-13", note="n")
+        self.assertIsNone(outreach.get(self.con, "a.nl")["follow_up_at"])
+
+    def test_closed_or_uncontacted_records_are_locked(self):
+        outreach.add_not_contacted(self.con, "new.nl", "New")
+        self.contact("dnc.nl")
+        outreach.set_status(self.con, "dnc.nl", "DO_NOT_CONTACT", note="opt-out")
+        self.contact("ni.nl")
+        outreach.set_status(self.con, "ni.nl", "NOT_INTERESTED")
+        for d in ("new.nl", "dnc.nl", "ni.nl"):
+            with self.assertRaises(outreach.OutreachError, msg=d):
+                outreach.update_details(self.con, d, follow_up_at="2026-10-13", note="n")
+
+    def test_follow_up_status_record_can_be_rescheduled(self):
+        self.contact("a.nl")
+        outreach.set_status(self.con, "a.nl", "FOLLOW_UP", follow_up_at="2026-10-13", note="follow-up 1 sent")
+        r = outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-22", note="final follow-up")
+        self.assertEqual((r["status"], r["follow_up_at"]), ("FOLLOW_UP", "2026-10-22"))
+
+
+class TestUpdateCli(OutreachCase):
+    def cli(self, *argv):
+        import run
+        db = str(Path(self.tmp.name) / "o.sqlite")
+        with mock.patch("sys.argv", ["run.py", "--db", db, *argv]):
+            try:
+                run.main()
+            finally:
+                run.close_connections()
+
+    def test_follow_up_only_does_not_touch_prospect_rows(self):
+        self.save(ready("p.nl"))
+        self.contact("c.nl")
+        self.con.commit()
+        before = [tuple(r) for r in self.con.execute("select * from prospects")]
+        self.cli("outreach", "update", "c.nl", "--follow-up", "2026-10-13", "--note", "policy")
+        self.assertEqual([tuple(r) for r in self.con.execute("select * from prospects")], before)
+        self.assertEqual(outreach.get(self.con, "c.nl")["follow_up_at"], "2026-10-13")
+
+    def test_email_change_rescores_contact_matching(self):
+        self.save(ready("other-site.nl", public_email="info@vt-mail.nl"))
+        outreach.record_contact(self.con, "vt.nl", "VT", None, "2026-10-06")
+        self.con.commit()
+        self.cli("outreach", "update", "vt.nl", "--email", "info@vt-mail.nl", "--note", "confirmed")
+        q = self.con.execute("select queue from prospects where domain = 'other-site.nl'").fetchone()[0]
+        self.assertEqual(q, "CONTACTED")                     # same email as a contacted company -> excluded
+
+    def test_invalid_input_exits_without_change(self):
+        self.contact("c.nl")
+        self.con.commit()
+        for bad in ("2026/10/13", "2026-02-30"):
+            with self.assertRaises(SystemExit):
+                self.cli("outreach", "update", "c.nl", "--follow-up", bad, "--note", "x")
+        self.assertIsNone(outreach.get(self.con, "c.nl")["follow_up_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

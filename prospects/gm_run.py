@@ -221,7 +221,7 @@ def step_outreach_queue(ctx: Context) -> Outcome:
 
 def step_follow_up_queue(ctx: Context) -> Outcome:
     today = ctx.run_date.isoformat()
-    due, missing = [], []
+    due, missing, no_recipient = [], [], []
     wanted = set()
     for r in ctx.con.execute("select * from outreach where status in ('CONTACTED', 'FOLLOW_UP') order by domain"):
         if not r["follow_up_at"]:
@@ -230,20 +230,30 @@ def step_follow_up_queue(ctx: Context) -> Outcome:
             fp = f"follow-up:{r['domain']}:{r['follow_up_at']}"
             wanted.add(fp)
             due.append(r["domain"])
+            if not r["email"]:
+                no_recipient.append(r["domain"])
+                ctx.incident("follow-up:no-recipient:", r["domain"], "P2",
+                             f"follow-up to {r['company']} is due but the recipient address is unknown",
+                             detail="the CEO confirms the address actually used (e.g. from the Sent folder), then: "
+                                    f"python run.py outreach update {r['domain']} --email ... --note ...",
+                             source="follow_up_queue", needs_ceo=True)
             gm_state.request_approval(
                 ctx.con, fp, "SEND_FOLLOW_UP", f"Follow-up to {r['company']} (due {r['follow_up_at']})",
-                details={"domain": r["domain"], "email": r["email"], "contacted_at": r["contacted_at"],
+                details={"domain": r["domain"], "email": r["email"] or "UNKNOWN", "contacted_at": r["contacted_at"],
                          "subject": r["subject"], "message_version": r["message_version"],
                          "next_action": r["next_action"]},
-                risk="external communication", recommendation="CEO decides; a draft can be prepared on request",
+                risk="external communication",
+                recommendation=("RECIPIENT UNKNOWN — confirm the address before any follow-up"
+                                if not r["email"] else "CEO decides; a draft can be prepared on request"),
                 run_id=ctx.run_id, at=ctx.ts())
+    ctx.settle("follow-up:no-recipient:")
     gm_state.withdraw_unrequested(ctx.con, "follow-up:", wanted, reason="follow-up no longer due (status changed)",
                                   run_id=ctx.run_id, at=ctx.ts())
     if missing:
         ctx.incident("follow-up:missing-date", "", "P2", f"{len(missing)} contacted companies have no follow-up date",
                      detail=", ".join(missing), source="follow_up_queue", needs_ceo=True)
     ctx.settle("follow-up:missing-date")
-    return Outcome("DONE", {"due": due, "missing_follow_up_date": missing})
+    return Outcome("DONE", {"due": due, "missing_follow_up_date": missing, "due_without_recipient": no_recipient})
 
 
 def step_problem_detection(ctx: Context) -> Outcome:
