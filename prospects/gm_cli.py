@@ -58,7 +58,8 @@ def cmd_actions(args):
         print(f"#{a['id']:<4} {a['category']:<18} {a['title']}\n      risk: {a['risk'] or '-'}"
               f" | recommendation: {a['recommendation'] or '-'}")
     for a in p["approved_not_done"]:
-        print(f"#{a['id']:<4} APPROVED, not done: {a['title']}")
+        stop = gm_state.follow_up_send_blocked(con, a)
+        print(f"#{a['id']:<4} APPROVED, not done: {a['title']}" + (f"\n      DO NOT SEND: {stop}" if stop else ""))
     for i in p["incidents"]:
         print(f"incident #{i['id']} [{i['severity']}] {i['title']}" + (f"\n      {i['detail']}" if i["detail"] else ""))
     if not any(p.values()):
@@ -71,6 +72,9 @@ def cmd_approvals(args):
     for a in rows:
         print(f"#{a['id']:<4} {a['status']:<9} {a['category']:<18} {a['title']}"
               + (f"  [{a['decided_by']} {a['decided_at']}: {a['decision_note'] or ''}]" if a["decided_at"] else ""))
+        stop = gm_state.follow_up_send_blocked(con, a)
+        if stop:
+            print(f"      DO NOT SEND: {stop}")
         if args.details and a["details"]:
             print("      " + a["details"])
     print(f"[gm] {len(rows)} approval requests")

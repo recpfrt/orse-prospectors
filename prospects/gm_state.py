@@ -493,6 +493,20 @@ def decisions(con: sqlite3.Connection) -> list[sqlite3.Row]:
 
 # ---------------------------------------------------------------- pending CEO actions (derived, not stored twice)
 
+def follow_up_send_blocked(con: sqlite3.Connection, approval) -> str | None:
+    """Why an APPROVED follow-up must NOT be sent any more (the prospect replied, opted out or the record is gone
+    since the CEO approved it), else None. Decided approvals cannot be withdrawn, so this is checked on display."""
+    if approval["category"] != "SEND_FOLLOW_UP" or approval["status"] != "APPROVED":
+        return None
+    domain = (json.loads(approval["details"]) if approval["details"] else {}).get("domain")
+    row = con.execute("select status from outreach where domain = ?", (domain,)).fetchone()
+    if row is None:
+        return f"no outreach record for {domain}"
+    if row["status"] not in ("CONTACTED", "FOLLOW_UP"):
+        return f"{domain} is now {row['status']} (reply/opt-out after approval)"
+    return None
+
+
 def pending_ceo_actions(con: sqlite3.Connection) -> dict:
     """Everything waiting on the CEO: undecided approval requests, approved actions the CEO has not carried out
     yet, and open incidents that need a CEO decision or are P0/P1."""

@@ -496,10 +496,23 @@ class TestFollowUpTracking(GmCase):
         inc = {i["fingerprint"]: i for i in gm_state.open_incidents(self.con)}
         nr = inc["follow-up:no-recipient:vt.nl"]
         self.assertEqual((nr["severity"], nr["needs_ceo"]), ("P2", 1))
-        fu = [a for a in self.approvals("PENDING") if a["category"] == "SEND_FOLLOW_UP"]
-        self.assertEqual(len(fu), 1)
-        self.assertEqual(json.loads(fu[0]["details"])["email"], "UNKNOWN")
-        self.assertIn("RECIPIENT UNKNOWN", fu[0]["recommendation"])
+        self.assertIn("RECIPIENT UNKNOWN", nr["detail"])
+        self.assertEqual([a for a in self.approvals() if a["category"] == "SEND_FOLLOW_UP"], [])   # nothing approvable
+
+    def test_unknown_or_invalid_recipient_never_gets_an_approval_on_reruns(self):
+        self.contacted("vt.nl", None)
+        self.contacted("bad.nl", "info@bad.nl")
+        self.con.execute("update outreach set email = 'UNKNOWN' where domain = 'bad.nl'")      # not a valid address
+        for d in ("vt.nl", "bad.nl"):
+            outreach.update_details(self.con, d, follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        for day in (13, 14, 15):
+            res = self.next_day_run(day)
+        self.assertEqual([a for a in self.approvals() if a["category"] == "SEND_FOLLOW_UP"], [])
+        step = {s["step"]: s for s in gm_state.steps(self.con, res["run_id"])}["follow_up_queue"]
+        self.assertEqual(sorted(json.loads(step["result"])["due_without_recipient"]), ["bad.nl", "vt.nl"])
+        self.assertEqual(len([i for i in gm_state.open_incidents(self.con)
+                              if i["fingerprint"].startswith("follow-up:no-recipient:")]), 2)
 
     def test_confirmed_recipient_resolves_the_escalation(self):
         self.contacted("vt.nl", None)
@@ -558,6 +571,96 @@ class TestFollowUpTracking(GmCase):
         self.next_day_run(day=22)
         st = {a["fingerprint"]: a["status"] for a in self.approvals()}
         self.assertEqual(st["follow-up:a.nl:2026-10-22"], "PENDING")
+
+    # --- approved follow-up, then reply / STOP before the CEO sends it
+
+    def approve_due_follow_up(self, domain="a.nl"):
+        gm_state.ensure_schema(self.con)
+        gm_state.set_ceo_pin(self.con, "123456")
+        self.contacted(domain, f"info@{domain}")
+        outreach.update_details(self.con, domain, follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        self.next_day_run()
+        a = [a for a in self.approvals("PENDING") if a["category"] == "SEND_FOLLOW_UP"][0]
+        gm_state.decide_approval(self.con, a["id"], "APPROVED", pin="123456", note="go")
+        self.con.commit()
+        return a["id"]
+
+    def assert_do_not_send(self, aid):
+        self.next_day_run(day=14)
+        inc = {i["fingerprint"]: i for i in gm_state.open_incidents(self.con)}
+        p1 = inc[f"follow-up:do-not-send:{aid}"]
+        self.assertEqual((p1["severity"], p1["needs_ceo"]), ("P1", 1))
+        self.assertIn("DO NOT SEND", p1["title"])
+        approved = gm_state.pending_ceo_actions(self.con)["approved_not_done"]
+        self.assertTrue(gm_state.follow_up_send_blocked(self.con, approved[0]))
+        report = (self.reports / "2026-10-14.md").read_text(encoding="utf-8")
+        self.assertIn("DO NOT SEND", report)
+
+    def test_reply_after_approval_blocks_the_approved_follow_up(self):
+        aid = self.approve_due_follow_up()
+        outreach.set_status(self.con, "a.nl", "REPLIED", reply_type="question", note="replied before we sent")
+        self.con.commit()
+        self.assert_do_not_send(aid)
+
+    def test_stop_after_approval_blocks_the_approved_follow_up(self):
+        aid = self.approve_due_follow_up()
+        outreach.set_status(self.con, "a.nl", "DO_NOT_CONTACT", reply_type="unsubscribe", note="stop")
+        self.con.commit()
+        self.assert_do_not_send(aid)
+
+    def test_approved_follow_up_without_reply_is_not_blocked_and_block_clears_when_closed(self):
+        aid = self.approve_due_follow_up()
+        self.assertIsNone(gm_state.follow_up_send_blocked(self.con, self.approvals("APPROVED")[0]))
+        outreach.set_status(self.con, "a.nl", "REPLIED", reply_type="question", note="reply")
+        self.con.commit()
+        self.next_day_run(day=14)
+        gm_state.decide_approval(self.con, aid, "DONE", pin="123456", note="not sent: reply received")
+        self.con.commit()
+        self.next_day_run(day=15)
+        self.assertNotIn(f"follow-up:do-not-send:{aid}", {i["fingerprint"] for i in gm_state.open_incidents(self.con)})
+
+    # --- maximum 2 follow-ups
+
+    def test_maximum_two_follow_ups(self):
+        self.contacted("a.nl", "info@a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy")
+        self.assertEqual(outreach.follow_ups_sent(self.con, "a.nl"), 0)
+        r = outreach.set_status(self.con, "a.nl", "FOLLOW_UP", follow_up_at="2026-10-20", note="follow-up 1 sent")
+        self.assertEqual((outreach.follow_ups_sent(self.con, "a.nl"), r["follow_up_at"]), (1, "2026-10-20"))
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-21", note="moved")   # not counted as a send
+        self.assertEqual(outreach.follow_ups_sent(self.con, "a.nl"), 1)
+        with self.assertRaises(outreach.OutreachError):                              # #2 is the last: no next date
+            outreach.set_status(self.con, "a.nl", "FOLLOW_UP", follow_up_at="2026-10-28", note="x")
+        r = outreach.set_status(self.con, "a.nl", "FOLLOW_UP", note="follow-up 2 sent")
+        self.assertEqual((outreach.follow_ups_sent(self.con, "a.nl"), r["follow_up_at"]), (2, None))
+        with self.assertRaises(outreach.OutreachError):
+            outreach.set_status(self.con, "a.nl", "FOLLOW_UP", note="follow-up 3")
+        with self.assertRaises(outreach.OutreachError):
+            outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-28", note="third")
+        self.con.execute("update outreach set follow_up_at = '2026-10-12' where domain = 'a.nl'")   # forced past date
+        self.con.commit()
+        res = self.next_day_run()
+        self.assertEqual([a for a in self.approvals() if a["category"] == "SEND_FOLLOW_UP"], [])
+        step = json.loads({s["step"]: s for s in gm_state.steps(self.con, res["run_id"])}["follow_up_queue"]["result"])
+        self.assertNotIn("a.nl", step["due"] + step["missing_follow_up_date"])
+
+    def test_gm_creates_at_most_two_follow_up_approvals(self):
+        gm_state.ensure_schema(self.con)
+        gm_state.set_ceo_pin(self.con, "123456")
+        self.contacted("a.nl", "info@a.nl")
+        outreach.update_details(self.con, "a.nl", follow_up_at="2026-10-13", note="policy")
+        self.con.commit()
+        for day, nxt in ((13, "2026-10-20"), (20, None)):
+            self.next_day_run(day)
+            a = [a for a in self.approvals("PENDING") if a["category"] == "SEND_FOLLOW_UP"][0]
+            gm_state.decide_approval(self.con, a["id"], "APPROVED", pin="123456", note="ok")
+            gm_state.decide_approval(self.con, a["id"], "DONE", pin="123456", note="sent")
+            outreach.set_status(self.con, "a.nl", "FOLLOW_UP", follow_up_at=nxt, note="sent")
+            self.con.commit()
+        for day in (21, 27, 30):
+            self.next_day_run(day)
+        self.assertEqual(len([a for a in self.approvals() if a["category"] == "SEND_FOLLOW_UP"]), 2)
 
 
 class TestContactInvariant(GmCase):

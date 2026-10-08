@@ -221,39 +221,56 @@ def step_outreach_queue(ctx: Context) -> Outcome:
 
 def step_follow_up_queue(ctx: Context) -> Outcome:
     today = ctx.run_date.isoformat()
-    due, missing, no_recipient = [], [], []
+    due, missing, no_recipient, blocked = [], [], [], []
     wanted = set()
     for r in ctx.con.execute("select * from outreach where status in ('CONTACTED', 'FOLLOW_UP') order by domain"):
+        if outreach.follow_ups_sent(ctx.con, r["domain"]) >= outreach.MAX_FOLLOW_UPS:
+            continue                                      # policy maximum reached: never a further follow-up
         if not r["follow_up_at"]:
             missing.append(r["domain"])
         elif r["follow_up_at"] <= today:
-            fp = f"follow-up:{r['domain']}:{r['follow_up_at']}"
-            wanted.add(fp)
             due.append(r["domain"])
-            if not r["email"]:
-                no_recipient.append(r["domain"])
+            if not (r["email"] and outreach.EMAIL_RE.match(r["email"])):
+                no_recipient.append(r["domain"])          # blocked: no approval until the recipient is recorded
                 ctx.incident("follow-up:no-recipient:", r["domain"], "P2",
                              f"follow-up to {r['company']} is due but the recipient address is unknown",
-                             detail="the CEO confirms the address actually used (e.g. from the Sent folder), then: "
-                                    f"python run.py outreach update {r['domain']} --email ... --note ...",
+                             detail="RECIPIENT UNKNOWN — no follow-up approval is created until the recipient is "
+                                    "recorded. The CEO confirms the address actually used (e.g. from the Sent "
+                                    f"folder), then: python run.py outreach update {r['domain']} --email ... --note ...",
                              source="follow_up_queue", needs_ceo=True)
+                continue
+            fp = f"follow-up:{r['domain']}:{r['follow_up_at']}"
+            wanted.add(fp)
             gm_state.request_approval(
                 ctx.con, fp, "SEND_FOLLOW_UP", f"Follow-up to {r['company']} (due {r['follow_up_at']})",
-                details={"domain": r["domain"], "email": r["email"] or "UNKNOWN", "contacted_at": r["contacted_at"],
+                details={"domain": r["domain"], "email": r["email"], "contacted_at": r["contacted_at"],
                          "subject": r["subject"], "message_version": r["message_version"],
                          "next_action": r["next_action"]},
                 risk="external communication",
-                recommendation=("RECIPIENT UNKNOWN — confirm the address before any follow-up"
-                                if not r["email"] else "CEO decides; a draft can be prepared on request"),
+                recommendation="CEO decides; a draft can be prepared on request",
                 run_id=ctx.run_id, at=ctx.ts())
     ctx.settle("follow-up:no-recipient:")
+    # A decided approval cannot be withdrawn: an APPROVED follow-up whose prospect has since replied or opted out
+    # is raised as a blocking P1 until the CEO closes the approval.
+    for a in gm_state.approvals(ctx.con, ("APPROVED",)):
+        reason = gm_state.follow_up_send_blocked(ctx.con, a)
+        if reason:
+            blocked.append(a["id"])
+            ctx.incident("follow-up:do-not-send:", str(a["id"]), "P1",
+                         f"DO NOT SEND approved follow-up #{a['id']} — {reason}",
+                         detail=f"approval #{a['id']} ({a['title']}) was approved before the reply/opt-out. Do not "
+                                "send it. If it was in fact already sent before the reply, close it with "
+                                f"`python run.py gm done {a['id']} --note ...`; otherwise leave it unsent.",
+                         source="follow_up_queue", needs_ceo=True)
+    ctx.settle("follow-up:do-not-send:")
     gm_state.withdraw_unrequested(ctx.con, "follow-up:", wanted, reason="follow-up no longer due (status changed)",
                                   run_id=ctx.run_id, at=ctx.ts())
     if missing:
         ctx.incident("follow-up:missing-date", "", "P2", f"{len(missing)} contacted companies have no follow-up date",
                      detail=", ".join(missing), source="follow_up_queue", needs_ceo=True)
     ctx.settle("follow-up:missing-date")
-    return Outcome("DONE", {"due": due, "missing_follow_up_date": missing, "due_without_recipient": no_recipient})
+    return Outcome("DONE", {"due": due, "missing_follow_up_date": missing, "due_without_recipient": no_recipient,
+                            "approved_do_not_send": blocked})
 
 
 def step_problem_detection(ctx: Context) -> Outcome:
@@ -400,7 +417,9 @@ def render_report(ctx: Context) -> str:
         for a in pending["approvals_pending"]:
             lines.append(f"- [#{a['id']} {a['category']}] {a['title']} — risk: {a['risk'] or '—'}")
         for a in pending["approved_not_done"]:
-            lines.append(f"- [#{a['id']} APPROVED, not done] {a['title']}")
+            stop = gm_state.follow_up_send_blocked(ctx.con, a)
+            lines.append(f"- [#{a['id']} APPROVED, not done] {a['title']}"
+                         + (f" — **DO NOT SEND: {stop}**" if stop else ""))
         for i in pending["incidents"]:
             lines.append(f"- [incident #{i['id']} {i['severity']}] {i['title']}")
         lines.append("")

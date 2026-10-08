@@ -75,8 +75,21 @@ class TestTransitions(OutreachCase):
         self.contact("a.nl")
         outreach.set_status(self.con, "a.nl", "FOLLOW_UP", follow_up_at="2026-10-20", note="follow-up 1 sent")
         r = outreach.set_status(self.con, "a.nl", "REPLIED", reply_type="question", next_action="answer pricing")
-        self.assertEqual((r["reply_type"], r["next_action"], r["follow_up_at"]), ("question", "answer pricing", "2026-10-20"))
+        self.assertEqual((r["reply_type"], r["next_action"], r["follow_up_at"]), ("question", "answer pricing", None))
         self.assertIn("follow-up 1 sent", r["notes"])
+
+    def test_reply_stop_and_final_outcomes_clear_follow_up_date(self):
+        for i, s in enumerate(("REPLIED", "INTERESTED", "NOT_INTERESTED", "DO_NOT_CONTACT")):
+            d = f"c{i}.nl"
+            self.contact(d)
+            outreach.update_details(self.con, d, follow_up_at="2026-10-13", note="policy")
+            r = outreach.set_status(self.con, d, s, note="outcome")
+            self.assertIsNone(r["follow_up_at"], s)
+            ev = self.con.execute("select note from outreach_events where domain = ? order by id desc", (d,)).fetchone()
+            self.assertIn("follow_up_at cleared (was 2026-10-13)", ev[0])
+        self.contact("x.nl")
+        with self.assertRaises(outreach.OutreachError):                    # a final outcome cannot carry a date
+            outreach.set_status(self.con, "x.nl", "REPLIED", follow_up_at="2026-10-20")
 
     def test_invalid_transitions_rejected(self):
         self.contact("a.nl")

@@ -42,6 +42,11 @@ for _s in STATUSES:
     if _s != DO_NOT_CONTACT:
         TRANSITIONS[_s] = TRANSITIONS[_s] | {DO_NOT_CONTACT}
 
+# CEO policy: at most 2 manual, CEO-approved follow-ups per prospect (counted from outreach_events).
+MAX_FOLLOW_UPS = 2
+# A reply, opt-out or final outcome ends the follow-up sequence: these statuses clear follow_up_at.
+CLEARS_FOLLOW_UP = (REPLIED, INTERESTED, NOT_INTERESTED, PILOT, CUSTOMER, DO_NOT_CONTACT)
+
 REPLY_TYPES = ("none", "positive", "question", "not_now", "not_interested", "unsubscribe", "bounce",
                "auto_reply", "other")
 
@@ -169,17 +174,40 @@ def set_status(con: sqlite3.Connection, domain: str, new_status: str, *, reply_t
     if reply_type is not None and reply_type not in REPLY_TYPES:
         raise OutreachError(f"unknown reply type {reply_type!r}")
     _check_date(follow_up_at, "follow_up_at")
+    clear = new_status in CLEARS_FOLLOW_UP
+    if clear and follow_up_at:
+        raise OutreachError(f"{new_status} ends the follow-up sequence; no follow-up date can be set")
+    if new_status == FOLLOW_UP:
+        sent = follow_ups_sent(con, domain)
+        if sent >= MAX_FOLLOW_UPS:
+            raise OutreachError(f"{domain} already had {sent} follow-ups (maximum {MAX_FOLLOW_UPS})")
+        if sent + 1 == MAX_FOLLOW_UPS:
+            if follow_up_at:
+                raise OutreachError(f"follow-up {MAX_FOLLOW_UPS} is the last one; no further follow-up date")
+            clear = True
+    event_note = note
+    if clear and row["follow_up_at"]:
+        event_note = (note + " | " if note else "") + f"follow_up_at cleared (was {row['follow_up_at']})"
     ts = state.now()
     notes = row["notes"]
     if note:
         notes = (notes + "\n" if notes else "") + f"[{ts[:10]}] {note}"
     con.execute("""update outreach set status = ?, reply_type = coalesce(?, reply_type),
-                     next_action = coalesce(?, next_action), follow_up_at = coalesce(?, follow_up_at),
+                     next_action = coalesce(?, next_action),
+                     follow_up_at = case when ? then null else coalesce(?, follow_up_at) end,
                      notes = ?, updated_at = ? where domain = ?""",
-                (new_status, reply_type, next_action, follow_up_at, notes, ts, domain))
+                (new_status, reply_type, next_action, clear, follow_up_at, notes, ts, domain))
     con.execute("insert into outreach_events (domain, at, from_status, to_status, note) values (?, ?, ?, ?, ?)",
-                (domain, ts, row["status"], new_status, note))
+                (domain, ts, row["status"], new_status, event_note))
     return dict(get(con, domain))
+
+
+def follow_ups_sent(con: sqlite3.Connection, domain: str) -> int:
+    """Follow-ups the CEO recorded as sent: status changes to FOLLOW_UP (update_details events keep the status and
+    are excluded by their 'details updated (' note prefix)."""
+    return con.execute("""select count(*) from outreach_events where domain = ? and to_status = ?
+                          and coalesce(note, '') not like 'details updated (%'""",
+                       (_norm_domain(domain), FOLLOW_UP)).fetchone()[0]
 
 
 # Records whose details may no longer change: not yet contacted, or closed.
@@ -202,6 +230,8 @@ def update_details(con: sqlite3.Connection, domain: str, *, note: str, follow_up
     if row["status"] in DETAILS_LOCKED:
         raise OutreachError(f"{domain} is {row['status']}; its details cannot be updated")
     _check_date(follow_up_at, "follow_up_at")
+    if follow_up_at is not None and follow_ups_sent(con, domain) >= MAX_FOLLOW_UPS:
+        raise OutreachError(f"{domain} already had {MAX_FOLLOW_UPS} follow-ups; no further follow-up date")
     if email is not None:
         if not EMAIL_RE.match(email.strip()):
             raise OutreachError(f"not a single plain email address: {email!r}")
