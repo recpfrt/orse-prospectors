@@ -20,3 +20,5 @@ data/backups/
 *.db-*
 # Scheduler/batch run logs written next to data
 data/*.log
+# Local do-not-contact runtime list (business emails); the code treats a missing file as empty
+data/do_not_contact.csv
